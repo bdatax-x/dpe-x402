@@ -5,6 +5,12 @@ import { paymentMiddleware } from "x402-express";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Nécessaire pour que req.protocol renvoie 'https' quand on est
+// derrière le proxy Cloudflare/Render (qui termine le SSL et
+// transmet en HTTP interne). Sans ça, le champ 'resource' dans
+// la réponse 402 renvoie http:// au lieu de https://.
+app.set("trust proxy", true);
+
 // ============================================================================
 // MIDDLEWARE DE PAIEMENT X402
 //
@@ -1363,7 +1369,7 @@ app.get(
         "OK",
 
       version:
-        "0.6.3",
+        "0.6.4",
 
       endpoints: {
         dpe:
@@ -1921,7 +1927,7 @@ app.get(
           "DPE-X402",
 
         version:
-          "0.6.3",
+          "0.6.4",
 
         trouve:
           resultats.length > 0,
