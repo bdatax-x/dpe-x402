@@ -1355,6 +1355,90 @@ function classerResultats(
 }
 
 // ============================================================================
+// ROUTE /.well-known/x402.json
+//
+// Convention de découverte x402 : permet aux crawlers et aux agents IA
+// autonomes de trouver automatiquement les endpoints payables et leurs
+// tarifs sur ce domaine. Sert de « carte d'identité » de l'API.
+//
+// Génération dynamique depuis les variables .env — si tu changes RECEIVER
+// ou NETWORK, le fichier reflète immédiatement le nouveau setup.
+// ============================================================================
+
+const USDC_CONTRACT = {
+  "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+};
+
+app.get(
+  "/.well-known/x402.json",
+  (req, res) => {
+    const protocol = req.protocol;
+    const host = req.get("host");
+    const baseUrl = `${protocol}://${host}`;
+
+    res.json({
+      version: 1,
+      provider: {
+        name: "BData X",
+        description: "APIs monétisées x402 sur données publiques françaises",
+        website: baseUrl
+      },
+      resources: [
+        {
+          path: "/dpe",
+          method: "GET",
+          url: `${baseUrl}/dpe`,
+          description:
+            "Recherche DPE (Diagnostic de Performance Énergétique) sur la base ADEME. " +
+            "Modes : adresse libre, code postal, GPS, numéro DPE, identifiant BAN.",
+          payment: {
+            scheme: "exact",
+            network: NETWORK,
+            asset: USDC_CONTRACT[NETWORK] ?? null,
+            price: PRICE_USDC,
+            payTo: RECEIVER_ADDRESS ?? null,
+            extra: {
+              name: "USDC",
+              version: "2"
+            }
+          },
+          input: {
+            type: "http",
+            method: "GET",
+            queryParams: [
+              { name: "cp", type: "string", description: "Code postal (5 chiffres)" },
+              { name: "adresse", type: "string", description: "Adresse libre" },
+              { name: "voie", type: "string", description: "Nom de rue" },
+              { name: "numero", type: "string", description: "Numéro de voie" },
+              { name: "ville", type: "string", description: "Nom de commune" },
+              { name: "numeroDPE", type: "string", description: "Identifiant DPE ADEME" },
+              { name: "lat", type: "number", description: "Latitude GPS" },
+              { name: "lon", type: "number", description: "Longitude GPS" },
+              { name: "surface", type: "number", description: "Surface m² (tri par proximité)" },
+              { name: "format", type: "string", description: "csv | xlsx | json (défaut json)" }
+            ]
+          },
+          output: {
+            type: "application/json",
+            description:
+              "Liste de DPE classés par pertinence avec meilleurResultat en tête. " +
+              "Champs : étiquette DPE/GES, surface, coût annuel, énergie chauffage, GPS, etc."
+          },
+          discoverable: true,
+          examples: [
+            `${baseUrl}/dpe?cp=75001`,
+            `${baseUrl}/dpe?adresse=203 rue Saint-Honoré 75001 Paris`,
+            `${baseUrl}/dpe?numeroDPE=2175E0465600P`,
+            `${baseUrl}/dpe?lat=48.864968&lon=2.331665`
+          ]
+        }
+      ]
+    });
+  }
+);
+
+// ============================================================================
 // ROUTE RACINE
 // ============================================================================
 
@@ -1369,7 +1453,7 @@ app.get(
         "OK",
 
       version:
-        "0.6.4",
+        "0.6.5",
 
       endpoints: {
         dpe:
@@ -1927,7 +2011,7 @@ app.get(
           "DPE-X402",
 
         version:
-          "0.6.4",
+          "0.6.5",
 
         trouve:
           resultats.length > 0,
