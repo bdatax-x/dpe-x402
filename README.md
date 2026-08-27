@@ -162,3 +162,20 @@ Temps de réponse typique : **< 500 ms**.
 ## Marque
 
 [**BData X**](https://bdatax.com) — Portfolio d'APIs françaises monétisées x402 sur données publiques.
+
+---
+
+## Licence
+
+Ce projet est distribué sous **Business Source License 1.1** (BSL) — voir [`LICENSE`](./LICENSE).
+
+**En résumé** :
+
+- ✅ Tu peux **étudier, forker, modifier** le code librement
+- ✅ Tu peux l'utiliser pour tes projets **personnels ou internes**
+- ✅ Tu peux **contribuer** via des pull requests
+- ❌ Tu ne peux **PAS** en faire une **SaaS commercial concurrent** de dpe.bdatax.com
+
+Le **27 août 2030**, cette licence bascule automatiquement en **Apache 2.0** (totalement libre).
+
+Pour un usage commercial concurrent avant cette date, contact via le repo.
