@@ -1,3 +1,23 @@
+# ============================================================================
+# Ajouts personnels au projet DPE-X402
+# ============================================================================
+
+# Clés et secrets
+client.env
+*.env.local
+
+# Documents personnels (PDF de doc, notes)
+dpe-x402-*.pdf
+
+# Fichiers d'export générés par les tests
+dpe_*.csv
+dpe_*.xlsx
+dpe_*.json
+
+# Anciens backups locaux du server
+server-*backup*.js
+server.backup.js
+server-avant-correction.js
 # Logs
 logs
 *.log
