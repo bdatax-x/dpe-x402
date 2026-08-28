@@ -1,6 +1,8 @@
 import express from "express";
 import * as XLSX from "xlsx";
 import { paymentMiddleware } from "x402-express";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1355,6 +1357,165 @@ function classerResultats(
 }
 
 // ============================================================================
+// ENRICHISSEMENT DVF (Demandes de Valeurs Foncières)
+//
+// Pour chaque DPE renvoyé, on ajoute (quand c'est possible) une estimation
+// de la valeur marchande de son quartier, basée sur les transactions
+// immobilières réelles publiées par la DGFiP :
+//
+//   dvf: {
+//     prixMedianM2:              12400,        // euros / m²
+//     prixEstimeTotal:           283960,       // = prixMedianM2 × surfaceM2
+//     nbTransactionsComparables: 8,            // taille de l'échantillon
+//     derniereTransaction:       "2025-11-14",
+//     rayonMetres:               200,
+//     ecartSurfacePct:           30
+//   }
+//
+// Renvoie null si l'échantillon est trop faible (< 3 transactions) ou si
+// le département n'est pas couvert par l'index.
+//
+// Les données sont pré-calculées par build-dvf-index.js et stockées dans
+// data/dvf/{dept}.json. Chaque département est chargé à la première
+// requête qui en a besoin, puis gardé en RAM (cache LRU max 10 dépts).
+// ============================================================================
+
+const DVF_DIR = "data/dvf";
+const DVF_RAYON_METRES = 200;    // Rayon de recherche autour du DPE
+const DVF_ECART_SURFACE = 0.30;  // ±30% de surface acceptée
+const DVF_MIN_ECHANTILLON = 3;   // Minimum de transactions pour renvoyer un chiffre
+const DVF_CACHE_MAX_DEPTS = 10;  // Éviction LRU au-delà de ce nombre
+
+// Cache mémoire : dept -> { transactions, lastAccess }
+const dvfCache = new Map();
+
+// Départements pour lesquels on a déjà constaté l'absence de fichier
+// (évite de faire un fs.existsSync à chaque requête pour un dept non couvert).
+const dvfMissing = new Set();
+
+function chargerDVFDept(dept) {
+  if (dvfMissing.has(dept)) return null;
+
+  const enCache = dvfCache.get(dept);
+  if (enCache) {
+    enCache.lastAccess = Date.now();
+    return enCache.transactions;
+  }
+
+  const chemin = path.join(DVF_DIR, `${dept}.json`);
+  if (!fs.existsSync(chemin)) {
+    dvfMissing.add(dept);
+    return null;
+  }
+
+  let transactions;
+  try {
+    transactions = JSON.parse(fs.readFileSync(chemin, "utf8"));
+  } catch (e) {
+    console.error(`⚠️  DVF : impossible de charger ${chemin} — ${e.message}`);
+    dvfMissing.add(dept);
+    return null;
+  }
+
+  // Éviction LRU si le cache est plein
+  if (dvfCache.size >= DVF_CACHE_MAX_DEPTS) {
+    let plusVieux = null;
+    let plusVieuxDate = Infinity;
+    for (const [d, entry] of dvfCache) {
+      if (entry.lastAccess < plusVieuxDate) {
+        plusVieuxDate = entry.lastAccess;
+        plusVieux = d;
+      }
+    }
+    if (plusVieux) dvfCache.delete(plusVieux);
+  }
+
+  dvfCache.set(dept, { transactions, lastAccess: Date.now() });
+  console.log(`💰 DVF chargé pour dept ${dept} : ${transactions.length} transactions`);
+  return transactions;
+}
+
+function medianeNombres(nombres) {
+  if (nombres.length === 0) return null;
+  const tries = [...nombres].sort((a, b) => a - b);
+  const milieu = Math.floor(tries.length / 2);
+  return tries.length % 2 !== 0
+    ? tries[milieu]
+    : (tries[milieu - 1] + tries[milieu]) / 2;
+}
+
+function deptDepuisDPE(dpe) {
+  // Priorité 1 : département fourni par la BAN (le plus fiable)
+  if (dpe.departement) return String(dpe.departement);
+
+  // Priorité 2 : dérivé du code postal
+  const cp = dpe.codePostal ? String(dpe.codePostal) : null;
+  if (!cp || cp.length < 2) return null;
+
+  // DROM : Guadeloupe 971, Martinique 972, Guyane 973, Réunion 974, Mayotte 976
+  if (cp.startsWith("97") || cp.startsWith("98")) return cp.slice(0, 3);
+
+  // Corse : 200xx et 201xx → 2A (Corse-du-Sud), 202xx et 206xx → 2B (Haute-Corse)
+  // Approximation acceptable ; les vrais cas limites sont rares.
+  if (cp.startsWith("20")) {
+    const suite = parseInt(cp.slice(2, 4), 10);
+    return suite <= 19 ? "2A" : "2B";
+  }
+
+  return cp.slice(0, 2);
+}
+
+function enrichirAvecDVF(dpe) {
+  if (!dpe || !Number.isFinite(dpe.latitude) || !Number.isFinite(dpe.longitude)) {
+    return null;
+  }
+
+  const dept = deptDepuisDPE(dpe);
+  if (!dept) return null;
+
+  const transactions = chargerDVFDept(dept);
+  if (!transactions || transactions.length === 0) return null;
+
+  // Type de bâtiment côté DPE → correspondance avec les codes DVF
+  // typeBatiment peut valoir "maison", "appartement", "immeuble", null, ...
+  const typeBatimentLower = String(dpe.typeBatiment || "").toLowerCase();
+  const typeAttendu = typeBatimentLower.includes("maison") ? "M" : "A";
+
+  const surfaceDPE = Number(dpe.surfaceM2) || 0;
+  const surfaceMin = surfaceDPE > 0 ? surfaceDPE * (1 - DVF_ECART_SURFACE) : 0;
+  const surfaceMax = surfaceDPE > 0 ? surfaceDPE * (1 + DVF_ECART_SURFACE) : Infinity;
+
+  // Filtrage : type + surface + géographique (rayon 200 m)
+  const comparables = [];
+  for (const t of transactions) {
+    if (t.t !== typeAttendu) continue;
+    if (surfaceDPE > 0 && (t.s < surfaceMin || t.s > surfaceMax)) continue;
+    const d = distanceMetres(dpe.latitude, dpe.longitude, t.la, t.lo);
+    if (d > DVF_RAYON_METRES) continue;
+    comparables.push(t);
+  }
+
+  if (comparables.length < DVF_MIN_ECHANTILLON) return null;
+
+  const prixM2 = comparables.map(t => t.p / t.s);
+  const median = medianeNombres(prixM2);
+
+  const derniereTransaction = comparables
+    .map(t => t.d)
+    .sort()
+    .pop();
+
+  return {
+    prixMedianM2: Math.round(median),
+    prixEstimeTotal: surfaceDPE > 0 ? Math.round(median * surfaceDPE) : null,
+    nbTransactionsComparables: comparables.length,
+    derniereTransaction,
+    rayonMetres: DVF_RAYON_METRES,
+    ecartSurfacePct: DVF_ECART_SURFACE * 100,
+  };
+}
+
+// ============================================================================
 // ROUTE /.well-known/x402.json
 //
 // Convention de découverte x402 : permet aux crawlers et aux agents IA
@@ -1934,6 +2095,30 @@ app.get(
         );
 
       // ----------------------------------------------------------------------
+      // ENRICHISSEMENT DVF (v0.7.0)
+      //
+      // On enrichit uniquement les résultats qui seront réellement renvoyés
+      // (après le slice), pour ne pas gaspiller de CPU sur les DPE écartés.
+      // La fonction enrichirAvecDVF() renvoie null si l'échantillon est
+      // trop faible ou si le département n'est pas indexé.
+      // ----------------------------------------------------------------------
+
+      resultats =
+        resultats.map(
+          (dpe) => ({
+            ...dpe,
+            dvf: enrichirAvecDVF(dpe)
+          })
+        );
+
+      // Idem pour dpeLePlusRecent (qui a été calculé avant slice) :
+      // on l'enrichit aussi pour cohérence de la réponse.
+      const dpeLePlusRecentEnrichi =
+        dpeLePlusRecent
+          ? { ...dpeLePlusRecent, dvf: enrichirAvecDVF(dpeLePlusRecent) }
+          : null;
+
+      // ----------------------------------------------------------------------
       // MEILLEUR RESULTAT
       // ----------------------------------------------------------------------
 
@@ -2011,7 +2196,7 @@ app.get(
           "DPE-X402",
 
         version:
-          "0.6.5",
+          "0.7.0",
 
         trouve:
           resultats.length > 0,
@@ -2037,7 +2222,8 @@ app.get(
 
         critereDeTri,
 
-        dpeLePlusRecent,
+        dpeLePlusRecent:
+          dpeLePlusRecentEnrichi,
 
         meilleurResultat:
           meilleur,

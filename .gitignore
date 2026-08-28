@@ -161,3 +161,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# ============================================================================
+# DPE-X402 — fichier source DVF et téléchargements incomplets
+# (l'index compact data/dvf/*.json est bien versionné, par contre le brut ne l'est pas)
+# ============================================================================
+full.csv.gz
+*.csv.gz
+data/dvf/*.tmp
+*.crdownload
