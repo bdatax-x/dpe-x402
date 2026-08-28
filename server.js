@@ -2341,6 +2341,55 @@ app.get(
     const debut =
       Date.now();
 
+    // ------------------------------------------------------------------------
+    // DÉFENSE EN PROFONDEUR — 402 avant tout le reste
+    //
+    // paymentMiddleware (x402-express) est supposé intercepter avant nous.
+    // Mais certains crawlers de découverte (notamment le probe backend de
+    // x402scan.com) semblent le contourner dans certains cas limites, et
+    // se retrouvent à recevoir notre 400 "aucun critère fourni" plutôt
+    // que le 402 attendu. Résultat : ils marquent l'endpoint comme
+    // non-conforme x402.
+    //
+    // On répond donc 402 nous-mêmes si le header X-PAYMENT est absent,
+    // avant même la validation des paramètres. La structure retournée
+    // suit strictement le format x402 v2 (accepts[].amount en unités
+    // atomiques du token, x402Version = 2).
+    // ------------------------------------------------------------------------
+    if (
+      !req.headers["x-payment"] &&
+      !req.headers["X-PAYMENT"]
+    ) {
+      return res.status(402).json({
+        x402Version: 2,
+        error: "X-PAYMENT header is required",
+        accepts: [
+          {
+            scheme: "exact",
+            network: NETWORK,
+            amount: "1000",
+            resource: `${req.protocol}://${req.get("host")}/dpe`,
+            description: "",
+            mimeType: "",
+            payTo: RECEIVER_ADDRESS ?? null,
+            maxTimeoutSeconds: 60,
+            asset: USDC_CONTRACT[NETWORK] ?? null,
+            outputSchema: {
+              input: {
+                type: "http",
+                method: "GET",
+                discoverable: true
+              }
+            },
+            extra: {
+              name: "USD Coin",
+              version: "2"
+            }
+          }
+        ]
+      });
+    }
+
     try {
 
       // ----------------------------------------------------------------------
