@@ -356,6 +356,28 @@ function nettoyerDPE(d) {
       d.identifiant_ban ??
       null,
 
+    // Code INSEE de la commune. Sources par ordre de priorité :
+    //   1. Champ direct ADEME (si présent)
+    //   2. Les 5 premiers caractères de identifiantBAN qui suit
+    //      le format "{codeInsee}_{voie}_{numero}" (ex: "75101_8635_00203")
+    codeInsee:
+      d.code_commune_ban ??
+      d.code_insee_ban ??
+      d.code_insee_commune_ban ??
+      (
+        d.identifiant_ban
+          ? (() => {
+              const morceaux = String(d.identifiant_ban).split("_");
+              const insee = morceaux[0];
+              // Format 5 chiffres OU corse (2A/2B suivis de 3 chiffres)
+              if (/^\d{5}$/.test(insee) || /^2[AB]\d{3}$/.test(insee)) {
+                return insee;
+              }
+              return null;
+            })()
+          : null
+      ),
+
     dateFinValidite:
       d.date_fin_validite_dpe ??
       null
@@ -1516,6 +1538,177 @@ function enrichirAvecDVF(dpe) {
 }
 
 // ============================================================================
+// ENRICHISSEMENT GÉORISQUES (v0.7.1)
+//
+// Pour chaque DPE renvoyé, on ajoute (quand c'est possible) une synthèse
+// des risques naturels et technologiques qui pèsent sur sa commune :
+//
+//   georisques: {
+//     commune: "PARIS 1ER ARRONDISSEMENT",
+//     codeInsee: "75101",
+//     risquesNaturels: {
+//       inondation: "existant",
+//       seisme: "faible",
+//       retraitGonflementArgile: "important",
+//       radon: "faible",
+//       mouvementTerrain: "existant",
+//       remonteeNappe: "existant"
+//     },
+//     risquesTechnologiques: {
+//       icpe: "concerne",
+//       canalisationsMatieresDangereuses: "concerne",
+//       pollutionSols: "concerne"
+//     },
+//     nbRisquesPresents: 9,
+//     sourceUrl: "https://www.georisques.gouv.fr/mes-risques/..."
+//   }
+//
+// Données servies par l'API officielle Géorisques (BRGM + Ministère de la
+// Transition écologique). Endpoint /resultats_rapport_risque, un appel par
+// commune, résultat mis en cache 24h en RAM (une même commune n'est appelée
+// qu'une fois par jour même si des centaines de DPEs y sont traités).
+//
+// Renvoie null si le codeInsee n'a pas pu être dérivé du DPE, si l'API
+// répond en erreur, ou si le timeout de 5s est dépassé. L'échec est silencieux
+// côté API DPE-X402 : les autres champs restent servis, seul `georisques`
+// vaut null pour ce résultat.
+// ============================================================================
+
+const GEORISQUES_URL = "https://www.georisques.gouv.fr/api/v1";
+const GEORISQUES_TIMEOUT_MS = 10000;                    // 10s, laisse de la marge
+const GEORISQUES_CACHE_MAX = 2000;                      // ~2000 communes en RAM
+const GEORISQUES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;    // 24h de fraîcheur
+
+const georisquesCache = new Map();     // codeInsee -> { data, timestamp }
+const georisquesInFlight = new Map();  // codeInsee -> Promise (request coalescing)
+
+// Extrait le niveau depuis libelleStatutCommune :
+//   "Risque Existant - faible"     -> "faible"
+//   "Risque Existant - important"  -> "important"
+//   "Risque Existant"              -> "existant"
+//   "Risque Concerne"              -> "concerne"
+//   null / present=false           -> null (risque absent)
+function niveauRisqueGeorisques(risque) {
+  if (!risque || risque.present !== true) return null;
+  const s = String(risque.libelleStatutCommune || "");
+  const m = s.match(/-\s*(.+)$/);
+  if (m) return m[1].trim().toLowerCase();
+  if (s.includes("Concerne")) return "concerne";
+  if (s.includes("Existant")) return "existant";
+  return "present";
+}
+
+function synthetiserGeorisques(brut) {
+  if (!brut) return null;
+
+  const naturels = {};
+  const technologiques = {};
+  let nbTotal = 0;
+
+  if (brut.risquesNaturels) {
+    for (const [key, val] of Object.entries(brut.risquesNaturels)) {
+      const n = niveauRisqueGeorisques(val);
+      if (n !== null) {
+        naturels[key] = n;
+        nbTotal++;
+      }
+    }
+  }
+
+  if (brut.risquesTechnologiques) {
+    for (const [key, val] of Object.entries(brut.risquesTechnologiques)) {
+      const n = niveauRisqueGeorisques(val);
+      if (n !== null) {
+        technologiques[key] = n;
+        nbTotal++;
+      }
+    }
+  }
+
+  return {
+    commune: brut.commune?.libelle ?? null,
+    codeInsee: brut.commune?.codeInsee ?? null,
+    risquesNaturels: naturels,
+    risquesTechnologiques: technologiques,
+    nbRisquesPresents: nbTotal,
+    sourceUrl: brut.url ?? null,
+  };
+}
+
+async function enrichirAvecGeorisques(dpe) {
+  if (!dpe || !dpe.codeInsee) return null;
+
+  const insee = String(dpe.codeInsee);
+
+  // 1. Cache LRU 24h
+  const enCache = georisquesCache.get(insee);
+  if (enCache && Date.now() - enCache.timestamp < GEORISQUES_CACHE_TTL_MS) {
+    // Rafraîchit l'ordre LRU
+    georisquesCache.delete(insee);
+    georisquesCache.set(insee, enCache);
+    return enCache.data;
+  }
+
+  // 2. Request coalescing : si un appel pour ce INSEE est déjà en vol,
+  // on partage sa Promise au lieu de lancer un doublon. Ça garantit
+  // exactement 1 appel réseau par INSEE dans une requête, peu importe
+  // combien de DPEs sont enrichis (20 DPEs à Paris 1er = 1 appel, pas 20).
+  if (georisquesInFlight.has(insee)) {
+    return georisquesInFlight.get(insee);
+  }
+
+  // 3. Nouvel appel API
+  const url =
+    `${GEORISQUES_URL}/resultats_rapport_risque?code_insee=${encodeURIComponent(insee)}`;
+
+  const promesse = (async () => {
+    try {
+      const reponse = await fetch(url, {
+        signal: AbortSignal.timeout(GEORISQUES_TIMEOUT_MS),
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "DPE-X402/0.7.1 (https://github.com/bdatax-x/dpe-x402)"
+        }
+      });
+
+      if (!reponse.ok) {
+        // Null soft pour éviter de retenter à chaque requête (24h)
+        georisquesCache.set(insee, { data: null, timestamp: Date.now() });
+        return null;
+      }
+
+      const brut = await reponse.json();
+      const synthese = synthetiserGeorisques(brut);
+
+      georisquesCache.set(insee, { data: synthese, timestamp: Date.now() });
+
+      // Éviction LRU si le cache dépasse le plafond
+      if (georisquesCache.size > GEORISQUES_CACHE_MAX) {
+        const clefPlusVieille = georisquesCache.keys().next().value;
+        georisquesCache.delete(clefPlusVieille);
+      }
+
+      return synthese;
+    } catch (e) {
+      const causeMsg = e.cause?.message ?? e.cause?.code ?? "";
+      console.error(
+        `⚠️  Géorisques INSEE ${insee} :`,
+        e.name || "",
+        e.message,
+        causeMsg ? `(cause: ${causeMsg})` : ""
+      );
+      return null;
+    } finally {
+      // Libère toujours la clé in-flight, succès ou échec
+      georisquesInFlight.delete(insee);
+    }
+  })();
+
+  georisquesInFlight.set(insee, promesse);
+  return promesse;
+}
+
+// ============================================================================
 // ROUTE /.well-known/x402.json
 //
 // Convention de découverte x402 : permet aux crawlers et aux agents IA
@@ -2095,27 +2288,39 @@ app.get(
         );
 
       // ----------------------------------------------------------------------
-      // ENRICHISSEMENT DVF (v0.7.0)
+      // ENRICHISSEMENT DVF + GÉORISQUES (v0.7.0 + v0.7.1)
       //
       // On enrichit uniquement les résultats qui seront réellement renvoyés
-      // (après le slice), pour ne pas gaspiller de CPU sur les DPE écartés.
-      // La fonction enrichirAvecDVF() renvoie null si l'échantillon est
-      // trop faible ou si le département n'est pas indexé.
+      // (après le slice), pour ne pas gaspiller de CPU / d'appels API sur
+      // les DPE écartés.
+      //
+      // enrichirAvecDVF        : sync, lookup local dans data/dvf/{dept}.json
+      // enrichirAvecGeorisques : async, appel API georisques.gouv.fr avec
+      //                          cache RAM 24h par code INSEE (donc au max
+      //                          1 appel par commune par jour, même si 100
+      //                          DPEs y sont enrichis).
+      //
+      // Les deux tournent en parallèle via Promise.all. Une commune Paris
+      // avec 20 DPE = 1 appel Géorisques + 20 lookups DVF = quelques ms.
       // ----------------------------------------------------------------------
 
-      resultats =
-        resultats.map(
-          (dpe) => ({
-            ...dpe,
-            dvf: enrichirAvecDVF(dpe)
-          })
-        );
+      resultats = await Promise.all(
+        resultats.map(async (dpe) => ({
+          ...dpe,
+          dvf: enrichirAvecDVF(dpe),
+          georisques: await enrichirAvecGeorisques(dpe)
+        }))
+      );
 
-      // Idem pour dpeLePlusRecent (qui a été calculé avant slice) :
-      // on l'enrichit aussi pour cohérence de la réponse.
+      // Idem pour dpeLePlusRecent (calculé avant le slice) : on l'enrichit
+      // aussi pour la cohérence de la réponse.
       const dpeLePlusRecentEnrichi =
         dpeLePlusRecent
-          ? { ...dpeLePlusRecent, dvf: enrichirAvecDVF(dpeLePlusRecent) }
+          ? {
+              ...dpeLePlusRecent,
+              dvf: enrichirAvecDVF(dpeLePlusRecent),
+              georisques: await enrichirAvecGeorisques(dpeLePlusRecent)
+            }
           : null;
 
       // ----------------------------------------------------------------------
@@ -2196,7 +2401,7 @@ app.get(
           "DPE-X402",
 
         version:
-          "0.7.0",
+          "0.7.1",
 
         trouve:
           resultats.length > 0,
