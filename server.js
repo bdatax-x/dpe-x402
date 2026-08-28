@@ -41,6 +41,66 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
+// TRANSFORMATION x402 v1 -> v2 (au vol)
+//
+// Le package x402-express@1.2.0 émet ses réponses 402 au format x402 v1
+// (champ maxAmountRequired, x402Version=1). Les crawlers modernes de
+// découverte agentique comme x402scan.com n'indexent que les APIs qui
+// répondent au format v2 (champ amount, x402Version=2).
+//
+// On intercepte donc res.json() pour transformer la structure à la volée
+// sur les seules réponses 402. Le reste du fonctionnement de x402-express
+// (parsing du header X-PAYMENT, vérification via facilitator, settlement
+// on-chain) reste strictement identique — on ne touche qu'à la carte
+// d'exigences renvoyée au client.
+// ============================================================================
+
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (
+      res.statusCode === 402 &&
+      body &&
+      body.x402Version === 1 &&
+      Array.isArray(body.accepts)
+    ) {
+      body = {
+        ...body,
+        x402Version: 2,
+        accepts: body.accepts.map((entree) => {
+          const { maxAmountRequired, ...reste } = entree;
+          return {
+            ...reste,
+            amount: maxAmountRequired
+          };
+        })
+      };
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+// ============================================================================
+// FAVICON — petit SVG inline
+//
+// Suggéré par x402scan pour l'affichage d'une icône marchand.
+// SVG minimal auto-suffisant : carré vert BData X avec un "X" blanc.
+// ============================================================================
+
+const FAVICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+  '<rect width="32" height="32" rx="6" fill="#2D5F3D"/>' +
+  '<text x="16" y="22" font-family="Arial, sans-serif" font-size="18" font-weight="700" text-anchor="middle" fill="#FFFFFF">X</text>' +
+  '</svg>';
+
+app.get("/favicon.ico", (req, res) => {
+  res.setHeader("Content-Type", "image/svg+xml");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(FAVICON_SVG);
+});
+
+// ============================================================================
 // MIDDLEWARE DE PAIEMENT X402
 //
 // Protège les routes listées en exigeant un paiement en USDC via le
