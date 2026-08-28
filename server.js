@@ -14,6 +14,33 @@ const PORT = process.env.PORT || 3000;
 app.set("trust proxy", true);
 
 // ============================================================================
+// CORS OUVERT
+//
+// Les crawlers de découverte agentique (x402scan, Agentic.Market, etc.)
+// lisent nos endpoints publics depuis leur propre navigateur, souvent
+// depuis un origin différent. Sans CORS ouvert, ils reçoivent le contenu
+// mais ne peuvent pas l'interpréter côté client. On expose donc les
+// headers CORS de base sur toutes les routes.
+// ============================================================================
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-PAYMENT, Authorization"
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "X-Payment-Response, X-PAYMENT-Response"
+  );
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// ============================================================================
 // MIDDLEWARE DE PAIEMENT X402
 //
 // Protège les routes listées en exigeant un paiement en USDC via le
@@ -1966,6 +1993,279 @@ app.get(
 
         telechargementJSON:
           "/dpe?cp=75001&format=json&download=true"
+      }
+    });
+  }
+);
+
+// ============================================================================
+// ROUTE /openapi.json
+//
+// Spécification OpenAPI 3.1.0 conforme aux exigences de découverte de
+// x402scan.com (et compatible avec les autres crawlers agentiques qui
+// suivent la même convention IETF étendue).
+//
+// Sert de contrat machine-lisible officiel : les agents IA autonomes
+// utilisent ce fichier pour comprendre les endpoints, les paramètres,
+// les réponses possibles et les modalités de paiement en une seule
+// lecture, sans avoir à interroger le serveur.
+//
+// x-payment-info suit la convention x402scan :
+//   - price.amount est en USD décimal (ex: "0.001000")
+//   - le runtime x402 v2 lui, exige des token atomic units (1000 pour 0.001 USDC)
+//
+// Cette dualité est voulue par la spec et permet aux agents de comparer
+// des prix entre APIs de façon uniforme sans avoir à convertir les décimales.
+// ============================================================================
+
+app.get(
+  "/openapi.json",
+  (req, res) => {
+    const protocol = req.protocol;
+    const host = req.get("host");
+    const baseUrl = `${protocol}://${host}`;
+
+    // Prix en USD décimal pour la spec statique (ex: "0.001000")
+    // PRICE_USDC arrive sous forme "$0.001" -> on retire le $ et on formate à 6 décimales
+    const priceUsdDecimal = (() => {
+      const brut = String(PRICE_USDC || "$0.001").replace(/^\$/, "");
+      const num = parseFloat(brut);
+      return isNaN(num) ? "0.001000" : num.toFixed(6);
+    })();
+
+    res.json({
+      openapi: "3.1.0",
+      info: {
+        title: "DPE-X402",
+        version: "0.7.1",
+        summary:
+          "API française sur les diagnostics de performance énergétique, " +
+          "enrichie de la valeur marchande immobilière et des risques du " +
+          "quartier, monétisée en USDC via x402.",
+        description:
+          "DPE-X402 croise en un seul appel payant : (1) les Diagnostics de " +
+          "Performance Énergétique publiés par l'ADEME (10,4 millions), (2) " +
+          "l'estimation de valeur marchande basée sur les transactions " +
+          "immobilières DVF/DGFiP (1,67 million de ventes 2024-2025 " +
+          "géolocalisées, filtrées à ±30 % de surface dans un rayon de " +
+          "200 m), (3) la synthèse des risques naturels et technologiques " +
+          "de la commune via l'API officielle Géorisques du BRGM " +
+          "(inondation, séisme, radon, retrait-gonflement des argiles, " +
+          "ICPE, canalisations matières dangereuses, pollution des sols). " +
+          "Idéal pour agents IA immobiliers, assureurs, plateformes de " +
+          "crédit immobilier, et due diligence pour la tokenisation " +
+          "immobilière.",
+        "x-guidance":
+          "Appelle GET /dpe avec au moins un critère de recherche parmi : " +
+          "code postal (cp=75001), adresse libre (adresse=203 rue Saint-Honoré " +
+          "75001 Paris), coordonnées GPS (lat=48.864968&lon=2.331665), " +
+          "identifiant DPE (numeroDPE=2175E0465600P), ou nom de voie " +
+          "(voie=Saint-Honoré&cp=75001). La réponse est un JSON avec " +
+          "'meilleurResultat' (le DPE le plus pertinent), 'resultats' " +
+          "(tableau trié par score de pertinence), 'dpeLePlusRecent'. Chaque " +
+          "résultat DPE porte automatiquement les champs 'dvf' (prix médian " +
+          "€/m² du quartier, estimation totale, nombre de comparables, date " +
+          "de la dernière transaction) et 'georisques' (risques naturels et " +
+          "technologiques par niveau : faible, existant, important, concerne). " +
+          "Le paiement se fait automatiquement via un client x402-compatible : " +
+          "0.001 USDC par appel sur Base mainnet. Toutes les données sont " +
+          "issues de bases publiques françaises (ADEME, DGFiP, BRGM, IGN).",
+        contact: {
+          name: "BData X",
+          email: "comeben@gmail.com",
+          url: "https://github.com/bdatax-x/dpe-x402"
+        },
+        license: {
+          name: "Business Source License 1.1 (BSL)",
+          url: `${baseUrl}/LICENSE`
+        },
+        termsOfService: "https://github.com/bdatax-x/dpe-x402#licence"
+      },
+
+      servers: [
+        { url: baseUrl, description: "Production (Base mainnet)" }
+      ],
+
+      tags: [
+        { name: "dpe",         description: "Diagnostics de Performance Énergétique (données ADEME)" },
+        { name: "real-estate", description: "Immobilier français" },
+        { name: "france",      description: "Données publiques France" },
+        { name: "energy",      description: "Performance énergétique du bâti" }
+      ],
+
+      paths: {
+        "/dpe": {
+          get: {
+            operationId: "searchDPE",
+            summary:
+              "Rechercher des DPE français enrichis avec valeur marchande et risques",
+            description:
+              "Retourne une liste de DPE (Diagnostic de Performance Énergétique) " +
+              "français correspondant aux critères de recherche, classés par " +
+              "pertinence. Chaque DPE est automatiquement enrichi avec (1) une " +
+              "estimation de valeur marchande basée sur les transactions " +
+              "immobilières comparables de la DGFiP dans un rayon de 200 m, " +
+              "(2) la synthèse des risques naturels et technologiques de la " +
+              "commune via l'API officielle Géorisques. Aucun paramètre de " +
+              "recherche n'est obligatoire individuellement, mais au moins un " +
+              "doit être fourni.",
+            tags: ["dpe", "real-estate", "france"],
+            "x-payment-info": {
+              price: {
+                mode: "fixed",
+                currency: "USD",
+                amount: priceUsdDecimal
+              },
+              protocols: [
+                { "x402": {} }
+              ]
+            },
+            parameters: [
+              { name: "cp",         in: "query", required: false, schema: { type: "string", pattern: "^\\d{5}$" }, description: "Code postal français (5 chiffres). Ex: 75001", example: "75001" },
+              { name: "adresse",    in: "query", required: false, schema: { type: "string" }, description: "Adresse libre. Numéro, rue, code postal et ville tous mélangés. Ex: '203 rue Saint-Honoré 75001 Paris'", example: "203 rue Saint-Honoré 75001 Paris" },
+              { name: "voie",       in: "query", required: false, schema: { type: "string" }, description: "Nom de rue (sans le type : 'Saint-Honoré' au lieu de 'Rue Saint-Honoré')", example: "Saint-Honoré" },
+              { name: "numero",     in: "query", required: false, schema: { type: "string" }, description: "Numéro dans la voie. Ex: '203'", example: "203" },
+              { name: "ville",      in: "query", required: false, schema: { type: "string" }, description: "Nom de la commune. Ex: 'Paris'", example: "Paris" },
+              { name: "numeroDPE",  in: "query", required: false, schema: { type: "string" }, description: "Identifiant DPE ADEME. Ex: '2175E0465600P'", example: "2175E0465600P" },
+              { name: "lat",        in: "query", required: false, schema: { type: "number", minimum: -90,  maximum: 90 },  description: "Latitude WGS84. Ex: 48.864968", example: 48.864968 },
+              { name: "lon",        in: "query", required: false, schema: { type: "number", minimum: -180, maximum: 180 }, description: "Longitude WGS84. Ex: 2.331665",  example: 2.331665 },
+              { name: "surface",    in: "query", required: false, schema: { type: "number", minimum: 1 },  description: "Surface habitable en m² — active un tri secondaire par proximité de surface", example: 45 },
+              { name: "size",       in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100, default: 20 }, description: "Nombre maximum de résultats renvoyés" },
+              { name: "format",     in: "query", required: false, schema: { type: "string", enum: ["json", "csv", "xlsx"], default: "json" }, description: "Format de sortie" }
+            ],
+            responses: {
+              "200": {
+                description: "Résultats DPE enrichis (paiement validé)",
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["service", "version", "trouve", "nombreResultats", "resultats"],
+                      properties: {
+                        service:               { type: "string", example: "DPE-X402" },
+                        version:               { type: "string", example: "0.7.1" },
+                        trouve:                { type: "boolean" },
+                        nombreResultats:       { type: "integer" },
+                        recherche:             { type: "object", description: "Récapitulatif des critères effectivement utilisés" },
+                        geocodageBAN:          { type: ["object", "null"], description: "Résultat du géocodage direct BAN" },
+                        geocodageBANInverse:   { type: ["object", "null"], description: "Résultat du géocodage inverse BAN" },
+                        requetesADEME:         { type: "array", items: { type: "string" }, description: "Requêtes effectuées sur l'API ADEME" },
+                        totalADEME:            { type: "integer", description: "Nombre total de correspondances ADEME (non tronquées)" },
+                        critereDeTri:          { type: "string" },
+                        meilleurResultat:      { $ref: "#/components/schemas/ResultatDPE" },
+                        dpeLePlusRecent:       { $ref: "#/components/schemas/ResultatDPE" },
+                        resultats:             { type: "array", items: { $ref: "#/components/schemas/ResultatDPE" } },
+                        meta:                  { type: "object", properties: { tempsMs: { type: "integer" } } }
+                      }
+                    }
+                  },
+                  "text/csv": {
+                    schema: { type: "string", description: "Export CSV compatible Excel FR (BOM UTF-8, séparateur point-virgule)" }
+                  },
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                    schema: { type: "string", format: "binary", description: "Export XLSX natif" }
+                  }
+                }
+              },
+              "400": {
+                description: "Requête invalide : aucun critère de recherche fourni",
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      properties: {
+                        erreur:   { type: "string" },
+                        exemples: { type: "array", items: { type: "string" } }
+                      }
+                    }
+                  }
+                }
+              },
+              "402": {
+                description: "Payment Required — le paiement x402 n'a pas été fourni ou n'est pas valide"
+              },
+              "500": {
+                description: "Erreur serveur",
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      properties: {
+                        erreur: { type: "string" },
+                        detail: { type: "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+
+      components: {
+        schemas: {
+          ResultatDPE: {
+            type: "object",
+            description:
+              "Un DPE nettoyé et enrichi. Champs 'dvf' et 'georisques' peuvent " +
+              "valoir null si l'enrichissement n'a pas trouvé assez de données " +
+              "comparables (moins de 3 transactions DVF dans le rayon, ou " +
+              "commune sans code INSEE dérivable pour Géorisques).",
+            properties: {
+              numeroDPE:               { type: ["string", "null"] },
+              date:                    { type: ["string", "null"], format: "date" },
+              adresse:                 { type: ["string", "null"] },
+              ville:                   { type: ["string", "null"] },
+              codePostal:              { type: ["string", "null"] },
+              codeInsee:               { type: ["string", "null"] },
+              departement:             { type: ["string", "null"] },
+              typeBatiment:            { type: ["string", "null"] },
+              surfaceM2:               { type: ["number", "null"] },
+              etiquetteDPE:            { type: ["string", "null"], enum: ["A", "B", "C", "D", "E", "F", "G", null] },
+              etiquetteGES:            { type: ["string", "null"], enum: ["A", "B", "C", "D", "E", "F", "G", null] },
+              consoKwhM2An:            { type: ["number", "null"] },
+              energieChauffage:        { type: ["string", "null"] },
+              anneeConstruction:       { type: ["integer", "null"] },
+              periodeConstruction:     { type: ["string", "null"] },
+              coutAnnuelTotal:         { type: ["number", "null"], description: "Coût annuel total 5 usages en euros" },
+              coutChauffage:           { type: ["number", "null"] },
+              latitude:                { type: ["number", "null"] },
+              longitude:               { type: ["number", "null"] },
+              distanceMetres:          { type: ["integer", "null"], description: "Distance au point de recherche si GPS fourni" },
+              scoreRecherche:          { type: ["number", "null"] },
+              dvf: {
+                type: ["object", "null"],
+                description: "Enrichissement DVF (transactions immobilières DGFiP dans les 200m)",
+                properties: {
+                  prixMedianM2:               { type: "integer", description: "Prix médian au m² en euros" },
+                  prixEstimeTotal:            { type: ["integer", "null"], description: "prixMedianM2 × surfaceM2" },
+                  nbTransactionsComparables:  { type: "integer" },
+                  derniereTransaction:        { type: "string", format: "date" },
+                  rayonMetres:                { type: "integer", example: 200 },
+                  ecartSurfacePct:            { type: "number", example: 30 }
+                }
+              },
+              georisques: {
+                type: ["object", "null"],
+                description: "Synthèse des risques naturels et technologiques (BRGM Géorisques)",
+                properties: {
+                  commune:                { type: "string" },
+                  codeInsee:              { type: "string" },
+                  risquesNaturels:        { type: "object", additionalProperties: { type: "string", enum: ["faible", "existant", "important", "concerne", "present"] } },
+                  risquesTechnologiques:  { type: "object", additionalProperties: { type: "string", enum: ["faible", "existant", "important", "concerne", "present"] } },
+                  nbRisquesPresents:      { type: "integer" },
+                  sourceUrl:              { type: "string", format: "uri", description: "Lien direct vers le rapport officiel Géorisques" }
+                }
+              }
+            }
+          }
+        }
+      },
+
+      externalDocs: {
+        url: "https://github.com/bdatax-x/dpe-x402",
+        description: "Code source et documentation complète"
       }
     });
   }
