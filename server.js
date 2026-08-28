@@ -1733,19 +1733,85 @@ app.get(
 
     res.json({
       version: 1,
+      apiVersion: "0.7.1",
+
+      // ------------------------------------------------------------------
+      // Provider — identité de la marque qui publie ces APIs
+      // ------------------------------------------------------------------
       provider: {
         name: "BData X",
-        description: "APIs monétisées x402 sur données publiques françaises",
-        website: baseUrl
+        description:
+          "Portfolio d'APIs françaises monétisées x402 sur données publiques " +
+          "(immobilier, énergie, risques, économie).",
+        website: "https://bdatax.com",
+        contact: {
+          github: "https://github.com/bdatax-x/dpe-x402",
+          type: "github-issue"
+        },
+        license: "BSL-1.1",
+        licenseUrl: `${baseUrl.replace(/\/$/, "")}/LICENSE`,
+        country: "FR",
+        language: "fr"
       },
+
+      // ------------------------------------------------------------------
+      // Categories & tags — champs libres pour aider les crawlers et
+      // annuaires (x402scan, Agentic.Market, Pay.sh, ampersend, etc.)
+      // à classer et à indexer par mots-clés.
+      // ------------------------------------------------------------------
+      categories: [
+        "real-estate",
+        "energy",
+        "public-data",
+        "geospatial",
+        "france",
+        "risk-assessment",
+        "property-valuation"
+      ],
+      tags: [
+        "dpe",
+        "diagnostic-performance-energetique",
+        "energy-performance-certificate",
+        "immobilier",
+        "real-estate",
+        "ademe",
+        "dvf",
+        "valeur-fonciere",
+        "property-price",
+        "georisques",
+        "flood-risk",
+        "seismic-risk",
+        "radon",
+        "ban",
+        "geocoding",
+        "france",
+        "insurance",
+        "lending",
+        "tokenization",
+        "ai-agents",
+        "machine-economy"
+      ],
+
+      // ------------------------------------------------------------------
+      // Ressources exposées, avec exigences de paiement et méta.
+      // ------------------------------------------------------------------
       resources: [
         {
           path: "/dpe",
           method: "GET",
           url: `${baseUrl}/dpe`,
+          name: "DPE + valeur marchande + risques",
           description:
-            "Recherche DPE (Diagnostic de Performance Énergétique) sur la base ADEME. " +
-            "Modes : adresse libre, code postal, GPS, numéro DPE, identifiant BAN.",
+            "Recherche DPE (Diagnostic de Performance Énergétique) sur la base " +
+            "publique ADEME France, enrichie automatiquement avec : (1) estimation " +
+            "de la valeur marchande basée sur les transactions immobilières réelles " +
+            "DVF/DGFiP (prix médian €/m², nombre de comparables 2024-2025, date de " +
+            "la dernière transaction du quartier), (2) synthèse des risques naturels " +
+            "et technologiques de la commune via l'API officielle Géorisques BRGM " +
+            "(inondation, séisme, radon, retrait-gonflement argile, ICPE, pollution " +
+            "des sols, canalisations matières dangereuses, etc.). Modes de recherche : " +
+            "adresse libre, code postal, GPS, numéro DPE, identifiant BAN, nom de rue.",
+
           payment: {
             scheme: "exact",
             network: NETWORK,
@@ -1757,6 +1823,7 @@ app.get(
               version: "2"
             }
           },
+
           input: {
             type: "http",
             method: "GET",
@@ -1767,25 +1834,82 @@ app.get(
               { name: "numero", type: "string", description: "Numéro de voie" },
               { name: "ville", type: "string", description: "Nom de commune" },
               { name: "numeroDPE", type: "string", description: "Identifiant DPE ADEME" },
-              { name: "lat", type: "number", description: "Latitude GPS" },
-              { name: "lon", type: "number", description: "Longitude GPS" },
+              { name: "lat", type: "number", description: "Latitude GPS (WGS84)" },
+              { name: "lon", type: "number", description: "Longitude GPS (WGS84)" },
               { name: "surface", type: "number", description: "Surface m² (tri par proximité)" },
-              { name: "format", type: "string", description: "csv | xlsx | json (défaut json)" }
+              { name: "format", type: "string", description: "csv | xlsx | json (défaut json)" },
+              { name: "size", type: "number", description: "Nombre max de résultats (1-100, défaut 20)" }
             ]
           },
+
           output: {
             type: "application/json",
             description:
-              "Liste de DPE classés par pertinence avec meilleurResultat en tête. " +
-              "Champs : étiquette DPE/GES, surface, coût annuel, énergie chauffage, GPS, etc."
+              "Objet JSON contenant : meilleurResultat (le DPE le plus pertinent), " +
+              "resultats (tableau classé), dpeLePlusRecent, geocodageBAN, requetesADEME. " +
+              "Chaque résultat porte : étiquette DPE/GES, surface, coût annuel, énergie, " +
+              "GPS, dvf { prixMedianM2, prixEstimeTotal, nbTransactionsComparables }, " +
+              "georisques { risquesNaturels, risquesTechnologiques, nbRisquesPresents }."
           },
+
+          features: [
+            "dpe-search",
+            "dvf-enrichment",
+            "georisques-enrichment",
+            "reverse-geocoding",
+            "csv-export",
+            "xlsx-export"
+          ],
+
+          coverage: {
+            country: "FR",
+            geographic: "national",
+            datasetsCount: 4
+          },
+
+          performance: {
+            typicalResponseTimeMs: 800,
+            rateLimit: "none"
+          },
+
           discoverable: true,
           examples: [
             `${baseUrl}/dpe?cp=75001`,
             `${baseUrl}/dpe?adresse=203 rue Saint-Honoré 75001 Paris`,
             `${baseUrl}/dpe?numeroDPE=2175E0465600P`,
-            `${baseUrl}/dpe?lat=48.864968&lon=2.331665`
+            `${baseUrl}/dpe?lat=48.864968&lon=2.331665`,
+            `${baseUrl}/dpe?cp=75001&format=csv`
           ]
+        }
+      ],
+
+      // ------------------------------------------------------------------
+      // Data sources — bases publiques réutilisées (pour transparence)
+      // ------------------------------------------------------------------
+      dataSources: [
+        {
+          name: "ADEME - DPE existants",
+          type: "energy-performance-certificate",
+          url: "https://data.ademe.fr",
+          license: "Open Data"
+        },
+        {
+          name: "DGFiP - DVF géolocalisées",
+          type: "real-estate-transactions",
+          url: "https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres-geolocalisees/",
+          license: "Licence Ouverte"
+        },
+        {
+          name: "BRGM - Géorisques",
+          type: "natural-technological-risks",
+          url: "https://www.georisques.gouv.fr",
+          license: "Open Data"
+        },
+        {
+          name: "IGN - Base Adresse Nationale",
+          type: "geocoding",
+          url: "https://adresse.data.gouv.fr",
+          license: "ODbL"
         }
       ]
     });
