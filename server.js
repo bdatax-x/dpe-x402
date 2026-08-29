@@ -64,19 +64,22 @@ app.use((req, res, next) => {
       Array.isArray(body.accepts)
     ) {
       // Émission duale v1 + v2 :
-      //   - x402Version passe à 2 pour que les crawlers modernes
-      //     (x402scan et co.) nous reconnaissent comme v2
-      //   - chaque entrée conserve maxAmountRequired (compat clients
-      //     historiques comme x402-fetch qui valide ce champ via Zod)
-      //   - et se voit ajouter amount (identique en valeur), lu par
-      //     les nouveaux clients v2
+      // Selon la version de x402-express, le champ de prix émis peut être
+      // maxAmountRequired (v1) OU amount (v2). Les crawlers modernes
+      // (x402scan) exigent amount ; les clients historiques (x402-fetch
+      // via Zod) exigent maxAmountRequired. On force donc les DEUX à
+      // être présents dans chaque entrée pour compat totale.
       body = {
         ...body,
-        x402Version: 2,
-        accepts: body.accepts.map((entree) => ({
-          ...entree,
-          amount: entree.maxAmountRequired ?? entree.amount ?? null
-        }))
+        x402Version: body.x402Version ?? 2,
+        accepts: body.accepts.map((entree) => {
+          const prix = entree.maxAmountRequired ?? entree.amount ?? null;
+          return {
+            ...entree,
+            maxAmountRequired: prix,
+            amount:            prix
+          };
+        })
       };
     }
     return originalJson(body);
