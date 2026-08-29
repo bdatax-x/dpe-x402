@@ -101,6 +101,92 @@ app.get("/favicon.ico", (req, res) => {
 });
 
 // ============================================================================
+// /llms.txt — convention pour crawlers IA
+//
+// llms.txt est une convention proposée par Jeremy Howard pour donner aux
+// modèles de langage (ChatGPT, Claude, Perplexity, Gemini, etc.) un
+// contexte structuré sur un site, lu au moment où un agent cherche à le
+// citer ou l'utiliser. Format : Markdown court à la racine du domaine.
+//
+// Notre /llms.txt annonce : ce qu'est DPE-X402, ce qu'il renvoie, comment
+// l'appeler, où trouver la spec machine-lisible, les sources publiques
+// utilisées, et le protocole de paiement.
+// ============================================================================
+
+const LLMS_TXT_CONTENU = `# DPE-X402
+
+> French Energy Performance Certificate API, enriched with real estate valuation (DVF) and territorial risks (Géorisques), monetized per-request via x402 micropayments on Base mainnet.
+
+DPE-X402 crosses four public French datasets in one paid API call: energy performance certificates (ADEME), real estate transactions (DGFiP/DVF), natural and technological risks (BRGM/Géorisques) and address geocoding (BAN/IGN).
+
+For each search, returns matching DPE records with automatically computed market value estimates (median €/m² of the neighborhood, based on comparable transactions within 200m and ±30% surface) and commune-level risk synthesis. Ideal for autonomous AI agents in real estate, insurance, credit scoring, and real estate tokenization use cases.
+
+Payment: ~0.001 USDC per call via HTTP 402 (x402 v2) on Base mainnet. No account, no API key required — the payment is signed automatically by any x402-compatible client.
+
+## Machine-readable specs
+
+- [OpenAPI 3.1 spec](https://dpe.bdatax.com/openapi.json): full contract with endpoints, parameters, responses, x-payment-info
+- [x402 discovery](https://dpe.bdatax.com/.well-known/x402.json): x402 protocol metadata for autonomous agents
+
+## Endpoints
+
+- [GET /dpe](https://dpe.bdatax.com/dpe?cp=75001): search DPE records enriched with DVF + Géorisques. Query by cp, adresse, voie, numero, ville, numeroDPE, lat/lon, or identifiantBAN. Returns JSON, CSV, or XLSX via ?format=.
+
+## Example calls
+
+- \`GET /dpe?cp=75001\` — DPE in Paris 1st arrondissement
+- \`GET /dpe?adresse=203 rue Saint-Honoré 75001 Paris\` — free-form address search
+- \`GET /dpe?lat=48.864968&lon=2.331665\` — GPS coordinates
+- \`GET /dpe?numeroDPE=2175E0465600P\` — direct DPE ID lookup
+- \`GET /dpe?cp=75001&format=csv\` — export CSV compatible with French Excel
+
+## Response fields
+
+Each result includes: numeroDPE, adresse, codePostal, codeInsee, surfaceM2, etiquetteDPE (A-G), etiquetteGES (A-G), coutAnnuelTotal (annual heating cost EUR), latitude, longitude, and two enrichment blocks:
+
+- \`dvf\` — { prixMedianM2, prixEstimeTotal, nbTransactionsComparables, derniereTransaction, rayonMetres, ecartSurfacePct }
+- \`georisques\` — { commune, codeInsee, risquesNaturels (inondation, seisme, radon, retraitGonflementArgile, mouvementTerrain, remonteeNappe…), risquesTechnologiques (icpe, canalisationsMatieresDangereuses, pollutionSols…), nbRisquesPresents, sourceUrl }
+
+Both blocks return null when the enrichment has insufficient data (fewer than 3 comparable DVF transactions in radius, or no derivable INSEE code for Géorisques). The API is honest about uncertainty rather than guessing.
+
+## Documentation
+
+- [GitHub repository](https://github.com/bdatax-x/dpe-x402): source code, README, examples, license (BSL 1.1, converts to Apache 2.0 in 2030)
+- [data.gouv.fr API listing](https://www.data.gouv.fr/dataservices/dpe-x402): official French public data portal listing with Swagger UI
+- [data.gouv.fr reuse](https://www.data.gouv.fr/reuses/dpe-x402-api-donnees-immobilieres-francaises-pour-agents-ia): cross-reference on French data portal
+
+## Data sources (all Open Data / Licence Ouverte)
+
+- ADEME DPE (10.4M records): https://data.ademe.fr
+- DGFiP DVF geolocalized (1.67M transactions 2024-2025 indexed): https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres-geolocalisees/
+- BRGM Géorisques (natural + technological risks per commune): https://www.georisques.gouv.fr
+- IGN Base Adresse Nationale (geocoding): https://adresse.data.gouv.fr
+
+## Payment technology
+
+- Protocol: x402 v2 (HTTP 402 Payment Required extension championed by Coinbase)
+- Blockchain: Base mainnet (Ethereum L2)
+- Asset: USDC — contract 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+- Client library example: [x402-fetch](https://www.npmjs.com/package/x402-fetch) for Node.js
+
+## Provider
+
+BData X — portfolio of French public data APIs monetized via x402 for the machine economy.
+
+## Optional
+
+- [x402 protocol](https://github.com/x402-foundation/x402): open standard for AI agent micropayments
+- [Base blockchain](https://base.org): Ethereum L2 by Coinbase
+- [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence): French Open Licence covering the upstream public datasets
+`;
+
+app.get("/llms.txt", (req, res) => {
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.send(LLMS_TXT_CONTENU);
+});
+
+// ============================================================================
 // MIDDLEWARE DE PAIEMENT X402
 //
 // Protège les routes listées en exigeant un paiement en USDC via le
