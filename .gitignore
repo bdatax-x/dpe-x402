@@ -170,3 +170,6 @@ full.csv.gz
 *.csv.gz
 data/dvf/*.tmp
 *.crdownload
+
+filosofi-2021.zip
+DS_FILOSOFI_*.csv

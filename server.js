@@ -117,9 +117,9 @@ const LLMS_TXT_CONTENU = `# DPE-X402
 
 > French Energy Performance Certificate API, enriched with real estate valuation (DVF) and territorial risks (Géorisques), monetized per-request via x402 micropayments on Base mainnet.
 
-DPE-X402 crosses four public French datasets in one paid API call: energy performance certificates (ADEME), real estate transactions (DGFiP/DVF), natural and technological risks (BRGM/Géorisques) and address geocoding (BAN/IGN).
+DPE-X402 crosses five public French datasets in one paid API call: energy performance certificates (ADEME), real estate transactions (DGFiP/DVF), natural and technological risks (BRGM/Géorisques), commune-level socio-economic indicators (INSEE FILOSOFI), and address geocoding (BAN/IGN).
 
-For each search, returns matching DPE records with automatically computed market value estimates (median €/m² of the neighborhood, based on comparable transactions within 200m and ±30% surface) and commune-level risk synthesis. Ideal for autonomous AI agents in real estate, insurance, credit scoring, and real estate tokenization use cases.
+For each search, returns matching DPE records with automatically computed market value estimates (median €/m² of the neighborhood, based on comparable transactions within 200m and ±30% surface), commune-level risk synthesis, and commune-level socio-economic indicators (median disposable income, poverty rate, D1/D9 deciles). Ideal for autonomous AI agents in real estate, insurance underwriting, credit scoring, and real estate tokenization use cases.
 
 Payment: ~0.001 USDC per call via HTTP 402 (x402 v2) on Base mainnet. No account, no API key required — the payment is signed automatically by any x402-compatible client.
 
@@ -142,12 +142,13 @@ Payment: ~0.001 USDC per call via HTTP 402 (x402 v2) on Base mainnet. No account
 
 ## Response fields
 
-Each result includes: numeroDPE, adresse, codePostal, codeInsee, surfaceM2, etiquetteDPE (A-G), etiquetteGES (A-G), coutAnnuelTotal (annual heating cost EUR), latitude, longitude, and two enrichment blocks:
+Each result includes: numeroDPE, adresse, codePostal, codeInsee, surfaceM2, etiquetteDPE (A-G), etiquetteGES (A-G), coutAnnuelTotal (annual heating cost EUR), latitude, longitude, and three enrichment blocks:
 
 - \`dvf\` — { prixMedianM2, prixEstimeTotal, nbTransactionsComparables, derniereTransaction, rayonMetres, ecartSurfacePct }
 - \`georisques\` — { commune, codeInsee, risquesNaturels (inondation, seisme, radon, retraitGonflementArgile, mouvementTerrain, remonteeNappe…), risquesTechnologiques (icpe, canalisationsMatieresDangereuses, pollutionSols…), nbRisquesPresents, sourceUrl }
+- \`insee\` — { revenuMedianNiveauVie, tauxPauvrete, decile1, decile9, rapportInterdecile, partSalaires, partRetraites, nombreMenages, nombrePersonnes, source } (from INSEE FILOSOFI 2021)
 
-Both blocks return null when the enrichment has insufficient data (fewer than 3 comparable DVF transactions in radius, or no derivable INSEE code for Géorisques). The API is honest about uncertainty rather than guessing.
+All three blocks return null when the enrichment has insufficient data (fewer than 3 comparable DVF transactions in radius, no derivable INSEE code for Géorisques, or commune under statistical secrecy for INSEE). The API is honest about uncertainty rather than guessing.
 
 ## Documentation
 
@@ -160,6 +161,7 @@ Both blocks return null when the enrichment has insufficient data (fewer than 3 
 - ADEME DPE (10.4M records): https://data.ademe.fr
 - DGFiP DVF geolocalized (1.67M transactions 2024-2025 indexed): https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres-geolocalisees/
 - BRGM Géorisques (natural + technological risks per commune): https://www.georisques.gouv.fr
+- INSEE FILOSOFI 2021 (median income, poverty rate, deciles by commune): https://www.insee.fr/fr/statistiques/7756729
 - IGN Base Adresse Nationale (geocoding): https://adresse.data.gouv.fr
 
 ## Payment technology
@@ -1711,6 +1713,132 @@ function enrichirAvecDVF(dpe) {
 }
 
 // ============================================================================
+// ENRICHISSEMENT INSEE FILOSOFI (v0.7.2)
+//
+// Pour chaque DPE renvoyé, on ajoute (quand c'est possible) une synthèse
+// des indicateurs socio-économiques de la commune :
+//
+//   insee: {
+//     revenuMedianNiveauVie: 38210,   // médiane niveau de vie annuel (€)
+//     tauxPauvrete: 8.4,              // % ménages sous seuil de pauvreté
+//     decile1: 17920,                 // premier décile (€)
+//     decile9: 84300,                 // neuvième décile (€)
+//     rapportInterdecile: 4.7,        // D9/D1 - indicateur d'inégalité
+//     partActifs: 59.2,               // % ménages actifs
+//     partRetraites: 22.8,            // % pensions/retraites dans revenus
+//     source: "FILOSOFI 2021"
+//   }
+//
+// Données servies par l'INSEE (FILOSOFI millésime 2021, dernière disponible).
+// Lookup local dans data/insee/{dept}.json, chargé à la première requête,
+// puis gardé en RAM (cache LRU max 20 dépts).
+//
+// Renvoie null si commune sous secret statistique (moins de 50 ménages
+// fiscaux) ou si le département n'est pas indexé.
+// ============================================================================
+
+const INSEE_DIR = "data/insee";
+const INSEE_CACHE_MAX_DEPTS = 20;
+
+const inseeCache = new Map();     // dept -> { data, lastAccess }
+const inseeMissing = new Set();   // dept -> pas de fichier
+
+function chargerINSEEDept(dept) {
+  if (inseeMissing.has(dept)) return null;
+
+  const enCache = inseeCache.get(dept);
+  if (enCache) {
+    enCache.lastAccess = Date.now();
+    return enCache.data;
+  }
+
+  const chemin = path.join(INSEE_DIR, `${dept}.json`);
+  if (!fs.existsSync(chemin)) {
+    inseeMissing.add(dept);
+    return null;
+  }
+
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(chemin, "utf8"));
+  } catch (e) {
+    console.error(`⚠️  INSEE : impossible de charger ${chemin} — ${e.message}`);
+    inseeMissing.add(dept);
+    return null;
+  }
+
+  if (inseeCache.size >= INSEE_CACHE_MAX_DEPTS) {
+    let plusVieux = null;
+    let plusVieuxDate = Infinity;
+    for (const [d, entry] of inseeCache) {
+      if (entry.lastAccess < plusVieuxDate) {
+        plusVieuxDate = entry.lastAccess;
+        plusVieux = d;
+      }
+    }
+    if (plusVieux) inseeCache.delete(plusVieux);
+  }
+
+  inseeCache.set(dept, { data, lastAccess: Date.now() });
+  console.log(`💰 INSEE chargé pour dept ${dept} : ${Object.keys(data).length} communes`);
+  return data;
+}
+
+// FILOSOFI publie Paris / Lyon / Marseille comme UNE commune parent, pas
+// comme arrondissements. Nos DPE ont pourtant les codes d'arrondissements
+// (75101-75120 pour Paris, 69381-69389 pour Lyon, 13201-13216 pour
+// Marseille). On rabat vers le code commune parent quand nécessaire.
+function inseeCommuneParent(codeInsee) {
+  const c = String(codeInsee);
+  if (/^751(0[1-9]|1[0-9]|20)$/.test(c)) return "75056";  // Paris (arrondissements → Paris commune)
+  if (/^6938[1-9]$/.test(c))              return "69123";  // Lyon (arrondissements → Lyon commune)
+  if (/^132(0[1-9]|1[0-6])$/.test(c))     return "13055";  // Marseille (arrondissements → Marseille commune)
+  return null;
+}
+
+function enrichirAvecINSEE(dpe) {
+  if (!dpe || !dpe.codeInsee) return null;
+
+  const insee = String(dpe.codeInsee);
+
+  // Département (mêmes règles que Géorisques)
+  let dept;
+  if (insee.startsWith("97") || insee.startsWith("98")) {
+    dept = insee.slice(0, 3);
+  } else if (insee.startsWith("2A") || insee.startsWith("2B")) {
+    dept = insee.slice(0, 2);
+  } else {
+    dept = insee.slice(0, 2);
+  }
+
+  const dictDept = chargerINSEEDept(dept);
+  if (!dictDept) return null;
+
+  // Priorité : code exact, sinon fallback vers commune parent (Paris/Lyon/Marseille)
+  let brut = dictDept[insee];
+  if (!brut) {
+    const parent = inseeCommuneParent(insee);
+    if (parent && dictDept[parent]) {
+      brut = dictDept[parent];
+    }
+  }
+  if (!brut) return null;
+
+  return {
+    revenuMedianNiveauVie:  brut.rm ?? null,
+    tauxPauvrete:           brut.tp ?? null,
+    decile1:                brut.d1 ?? null,
+    decile9:                brut.d9 ?? null,
+    rapportInterdecile:     brut.rd ?? null,
+    partSalaires:           brut.pa ?? null,
+    partRetraites:          brut.pr ?? null,
+    nombreMenages:          brut.nm ?? null,
+    nombrePersonnes:        brut.np ?? null,
+    source:                 "FILOSOFI 2021"
+  };
+}
+
+// ============================================================================
 // ENRICHISSEMENT GÉORISQUES (v0.7.1)
 //
 // Pour chaque DPE renvoyé, on ajoute (quand c'est possible) une synthèse
@@ -1840,7 +1968,7 @@ async function enrichirAvecGeorisques(dpe) {
         signal: AbortSignal.timeout(GEORISQUES_TIMEOUT_MS),
         headers: {
           "Accept": "application/json",
-          "User-Agent": "DPE-X402/0.7.1 (https://github.com/bdatax-x/dpe-x402)"
+          "User-Agent": "DPE-X402/0.7.2 (https://github.com/bdatax-x/dpe-x402)"
         }
       });
 
@@ -1906,7 +2034,8 @@ app.get(
 
     res.json({
       version: 1,
-      apiVersion: "0.7.1",
+      apiVersion: "0.7.2",
+      // Sources croisées : ADEME, DGFiP DVF, BRGM Géorisques, INSEE FILOSOFI, IGN BAN.
 
       // ------------------------------------------------------------------
       // Provider — identité de la marque qui publie ces APIs
@@ -2079,6 +2208,12 @@ app.get(
           license: "Open Data"
         },
         {
+          name: "INSEE - FILOSOFI 2021",
+          type: "socio-economic-indicators",
+          url: "https://www.insee.fr/fr/statistiques/7756729",
+          license: "Licence Ouverte"
+        },
+        {
           name: "IGN - Base Adresse Nationale",
           type: "geocoding",
           url: "https://adresse.data.gouv.fr",
@@ -2183,7 +2318,7 @@ app.get(
       openapi: "3.1.0",
       info: {
         title: "DPE-X402",
-        version: "0.7.1",
+        version: "0.7.2",
         summary:
           "API française sur les diagnostics de performance énergétique, " +
           "enrichie de la valeur marchande immobilière et des risques du " +
@@ -2289,7 +2424,7 @@ app.get(
                       required: ["service", "version", "trouve", "nombreResultats", "resultats"],
                       properties: {
                         service:               { type: "string", example: "DPE-X402" },
-                        version:               { type: "string", example: "0.7.1" },
+                        version:               { type: "string", example: "0.7.2" },
                         trouve:                { type: "boolean" },
                         nombreResultats:       { type: "integer" },
                         recherche:             { type: "object", description: "Récapitulatif des critères effectivement utilisés" },
@@ -2403,6 +2538,22 @@ app.get(
                   nbRisquesPresents:      { type: "integer" },
                   sourceUrl:              { type: "string", format: "uri", description: "Lien direct vers le rapport officiel Géorisques" }
                 }
+              },
+              insee: {
+                type: ["object", "null"],
+                description: "Enrichissement INSEE FILOSOFI (revenus, pauvreté et déciles de la commune)",
+                properties: {
+                  revenuMedianNiveauVie:  { type: ["integer", "null"], description: "Médiane du niveau de vie annuel par unité de consommation (€)" },
+                  tauxPauvrete:           { type: ["number", "null"],  description: "Taux de pauvreté au seuil de 60 % de la médiane du niveau de vie (%)" },
+                  decile1:                { type: ["integer", "null"], description: "1er décile du niveau de vie (€)" },
+                  decile9:                { type: ["integer", "null"], description: "9e décile du niveau de vie (€)" },
+                  rapportInterdecile:     { type: ["number", "null"],  description: "Rapport D9/D1 (indicateur d'inégalité de revenus)" },
+                  partSalaires:           { type: ["number", "null"],  description: "Part des salaires dans le revenu disponible de la commune (%)" },
+                  partRetraites:          { type: ["number", "null"],  description: "Part des pensions/retraites dans le revenu disponible (%)" },
+                  nombreMenages:          { type: ["integer", "null"], description: "Nombre de ménages fiscaux de la commune" },
+                  nombrePersonnes:        { type: ["integer", "null"], description: "Nombre de personnes des ménages fiscaux" },
+                  source:                 { type: "string", example: "FILOSOFI 2021" }
+                }
               }
             }
           }
@@ -2441,8 +2592,13 @@ app.get(
     // avant même la validation des paramètres. La structure retournée
     // suit strictement le format x402 v2 (accepts[].amount en unités
     // atomiques du token, x402Version = 2).
+    //
+    // Actif uniquement si le paiement x402 est activé (RECEIVER_ADDRESS
+    // renseigné dans .env), sinon le serveur en dev local ne saurait
+    // plus servir /dpe sans header X-PAYMENT.
     // ------------------------------------------------------------------------
     if (
+      RECEIVER_ADDRESS &&
       !req.headers["x-payment"] &&
       !req.headers["X-PAYMENT"]
     ) {
@@ -2907,7 +3063,7 @@ app.get(
         );
 
       // ----------------------------------------------------------------------
-      // ENRICHISSEMENT DVF + GÉORISQUES (v0.7.0 + v0.7.1)
+      // ENRICHISSEMENT DVF + GÉORISQUES + INSEE (v0.7.0 → v0.7.2)
       //
       // On enrichit uniquement les résultats qui seront réellement renvoyés
       // (après le slice), pour ne pas gaspiller de CPU / d'appels API sur
@@ -2918,16 +3074,20 @@ app.get(
       //                          cache RAM 24h par code INSEE (donc au max
       //                          1 appel par commune par jour, même si 100
       //                          DPEs y sont enrichis).
+      // enrichirAvecINSEE      : sync, lookup local dans data/insee/{dept}.json
+      //                          (FILOSOFI 2021 - revenus/pauvreté/déciles)
       //
-      // Les deux tournent en parallèle via Promise.all. Une commune Paris
-      // avec 20 DPE = 1 appel Géorisques + 20 lookups DVF = quelques ms.
+      // Les trois tournent en parallèle via Promise.all. Une commune Paris
+      // avec 20 DPE = 1 appel Géorisques + 20 lookups DVF + 20 lookups INSEE
+      // = quelques ms.
       // ----------------------------------------------------------------------
 
       resultats = await Promise.all(
         resultats.map(async (dpe) => ({
           ...dpe,
           dvf: enrichirAvecDVF(dpe),
-          georisques: await enrichirAvecGeorisques(dpe)
+          georisques: await enrichirAvecGeorisques(dpe),
+          insee: enrichirAvecINSEE(dpe)
         }))
       );
 
@@ -2938,7 +3098,8 @@ app.get(
           ? {
               ...dpeLePlusRecent,
               dvf: enrichirAvecDVF(dpeLePlusRecent),
-              georisques: await enrichirAvecGeorisques(dpeLePlusRecent)
+              georisques: await enrichirAvecGeorisques(dpeLePlusRecent),
+              insee: enrichirAvecINSEE(dpeLePlusRecent)
             }
           : null;
 
@@ -3020,7 +3181,7 @@ app.get(
           "DPE-X402",
 
         version:
-          "0.7.1",
+          "0.7.2",
 
         trouve:
           resultats.length > 0,

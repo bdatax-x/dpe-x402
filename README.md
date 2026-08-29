@@ -5,7 +5,7 @@
 [![Live](https://img.shields.io/badge/status-live-brightgreen)](https://dpe.bdatax.com)
 [![Network](https://img.shields.io/badge/network-base--mainnet-blue)](https://basescan.org)
 [![x402](https://img.shields.io/badge/x402-enabled-A05A2C)](https://x402.org)
-[![Version](https://img.shields.io/badge/version-0.7.1-informational)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.7.2-informational)](./CHANGELOG.md)
 
 > 🌐 **URL de production** : https://dpe.bdatax.com
 > 📄 **Découverte automatique** : https://dpe.bdatax.com/.well-known/x402.json
@@ -20,6 +20,7 @@ Interrogation intelligente de la base publique [ADEME](https://data.ademe.fr) su
 - **Géocodage automatique** via l'API [BAN](https://adresse.data.gouv.fr) (avec sélection stricte pour éviter les faux positifs)
 - **Enrichissement DVF** *(v0.7.0)* : chaque résultat est complété par une estimation de valeur marchande basée sur les transactions immobilières réelles publiées par la DGFiP (prix médian €/m², estimation totale, nombre de comparables, date de la dernière transaction du quartier)
 - **Enrichissement Géorisques** *(v0.7.1)* : chaque résultat est enrichi de la synthèse des risques naturels et technologiques de la commune (inondation, séisme, radon, retrait-gonflement argile, mouvement de terrain, ICPE, canalisations matières dangereuses, pollution des sols…), servie par l'API officielle Géorisques (BRGM + Ministère Transition écologique)
+- **Enrichissement INSEE FILOSOFI** *(v0.7.2)* : chaque résultat inclut les indicateurs socio-économiques de la commune — médiane du niveau de vie, taux de pauvreté, déciles D1/D9, rapport interdécile (indicateur d'inégalité), part des actifs et des retraités — issus du dispositif Fichier Localisé Social et Fiscal 2021 de l'INSEE
 - **Scoring intelligent** de la pertinence de chaque résultat
 - **Déduplication et classement multi-critères** (score, surface, date)
 - **3 formats d'export** : JSON (défaut), CSV, XLSX
@@ -189,7 +190,7 @@ Pour tester, il faut :
 
 ## Architecture
 
-Pipeline en 11 étapes pour chaque requête `/dpe` :
+Pipeline en 12 étapes pour chaque requête `/dpe` :
 
 1. Middleware x402 (paiement)
 2. Extraction des critères de recherche
@@ -201,9 +202,10 @@ Pipeline en 11 étapes pour chaque requête `/dpe` :
 8. Déduplication et classement multi-critères
 9. **Enrichissement DVF** — pour chaque résultat, lookup local des transactions immobilières comparables (cache LRU en mémoire)
 10. **Enrichissement Géorisques** — appel API `/resultats_rapport_risque` par code INSEE (cache RAM 24 h)
-11. Sortie au format demandé (JSON/CSV/XLSX)
+11. **Enrichissement INSEE FILOSOFI** — lookup local des revenus/pauvreté/déciles par code INSEE (cache LRU)
+12. Sortie au format demandé (JSON/CSV/XLSX)
 
-Temps de réponse typique : **< 800 ms** (l'appel Géorisques ajoute ~200-400 ms au premier appel par commune, ensuite servi depuis le cache).
+Temps de réponse typique : **< 800 ms** (l'appel Géorisques ajoute ~200-400 ms au premier appel par commune, ensuite servi depuis le cache ; DVF et INSEE sont locaux donc quelques ms).
 
 ---
 
@@ -211,7 +213,7 @@ Temps de réponse typique : **< 800 ms** (l'appel Géorisques ajoute ~200-400 ms
 
 - **v0.7.0** ✅ Enrichissement DVF (transactions immobilières, prix médian €/m²)
 - **v0.7.1** ✅ Enrichissement Géorisques (inondation, sismique, radon, pollutions, ICPE, argile…)
-- **v0.7.2** : Enrichissement INSEE IRIS (revenu médian, densité, catégorie socio-pro)
+- **v0.7.2** ✅ Enrichissement INSEE FILOSOFI (revenu médian, taux de pauvreté, déciles)
 - **v0.8.x** : Scores propriétaires (rénovation, confort d'été, attractivité globale)
 - **v0.9.x** : Endpoint `/dpe/enrichi` à tarif différencié (~0,02 USDC)
 - **v1.0** : Consolidation, SLA public, dashboards partenaires
@@ -223,6 +225,7 @@ Temps de réponse typique : **< 800 ms** (l'appel Géorisques ajoute ~200-400 ms
 - Données DPE : [ADEME](https://data.ademe.fr) — Open Data
 - Données de valeurs foncières (DVF) : [DGFiP / Etalab](https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres-geolocalisees/) — Open Data
 - Risques naturels et technologiques : [Géorisques](https://www.georisques.gouv.fr) — BRGM et Ministère de la Transition écologique
+- Revenus et pauvreté par commune : [INSEE FILOSOFI 2021](https://www.insee.fr/fr/statistiques/7756729) — Licence Ouverte
 - Géocodage : [Base Adresse Nationale](https://adresse.data.gouv.fr) — Open Data
 - Protocole de paiement : [x402](https://x402.org) — standard HTTP 402 poussé par Coinbase
 
