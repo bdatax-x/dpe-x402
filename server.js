@@ -63,15 +63,20 @@ app.use((req, res, next) => {
       body &&
       Array.isArray(body.accepts)
     ) {
-      // Émission duale v1 + v2 :
-      // Selon la version de x402-express, le champ de prix émis peut être
-      // maxAmountRequired (v1) OU amount (v2). Les crawlers modernes
-      // (x402scan) exigent amount ; les clients historiques (x402-fetch
-      // via Zod) exigent maxAmountRequired. On force donc les DEUX à
-      // être présents dans chaque entrée pour compat totale.
+      // Compat maximale x402 :
+      //   - x402Version forcé à 1 : le middleware paymentMiddleware de
+      //     x402-express 1.2.0 valide le payload de paiement contre un
+      //     schéma Zod qui exige x402Version === 1. Le client (x402-fetch)
+      //     mirror la version de notre 402 dans son payload — donc si on
+      //     annonce 2, le serveur rejette son propre client. On reste
+      //     donc en v1 côté runtime.
+      //   - Émission duale des champs amount + maxAmountRequired : les
+      //     clients v1 (x402-fetch) lisent maxAmountRequired, les crawlers
+      //     modernes (x402scan) lisent amount. On force les deux dans
+      //     chaque entrée pour couvrir tout le monde.
       body = {
         ...body,
-        x402Version: body.x402Version ?? 2,
+        x402Version: 1,
         accepts: body.accepts.map((entree) => {
           const prix = entree.maxAmountRequired ?? entree.amount ?? null;
           return {
@@ -2609,13 +2614,13 @@ app.get(
       !req.headers["X-PAYMENT"]
     ) {
       return res.status(402).json({
-        x402Version: 2,
+        x402Version: 1,
         error: "X-PAYMENT header is required",
         accepts: [
           {
             scheme: "exact",
             network: NETWORK,
-            // Émission duale : les deux champs de prix pour compat v1 + v2
+            // Émission duale : les deux champs de prix pour compat clients v1 + crawlers modernes
             maxAmountRequired: "1000",
             amount: "1000",
             resource: `${req.protocol}://${req.get("host")}/dpe`,
