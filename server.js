@@ -61,19 +61,22 @@ app.use((req, res, next) => {
     if (
       res.statusCode === 402 &&
       body &&
-      body.x402Version === 1 &&
       Array.isArray(body.accepts)
     ) {
+      // Émission duale v1 + v2 :
+      //   - x402Version passe à 2 pour que les crawlers modernes
+      //     (x402scan et co.) nous reconnaissent comme v2
+      //   - chaque entrée conserve maxAmountRequired (compat clients
+      //     historiques comme x402-fetch qui valide ce champ via Zod)
+      //   - et se voit ajouter amount (identique en valeur), lu par
+      //     les nouveaux clients v2
       body = {
         ...body,
         x402Version: 2,
-        accepts: body.accepts.map((entree) => {
-          const { maxAmountRequired, ...reste } = entree;
-          return {
-            ...reste,
-            amount: maxAmountRequired
-          };
-        })
+        accepts: body.accepts.map((entree) => ({
+          ...entree,
+          amount: entree.maxAmountRequired ?? entree.amount ?? null
+        }))
       };
     }
     return originalJson(body);
@@ -2609,6 +2612,8 @@ app.get(
           {
             scheme: "exact",
             network: NETWORK,
+            // Émission duale : les deux champs de prix pour compat v1 + v2
+            maxAmountRequired: "1000",
             amount: "1000",
             resource: `${req.protocol}://${req.get("host")}/dpe`,
             description: "",
