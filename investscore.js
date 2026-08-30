@@ -1,53 +1,46 @@
 // ============================================================================
-// INVESTSCORE v1 — BData X / DPE-X402
+// INVESTSCORE v2 — BData X / DPE-X402  (deux scores séparés)
 //
-// Transforme les données déjà croisées (DPE + DVF + Géorisques + INSEE) en
-// UNE décision chiffrée : "ce bien, bon investissement locatif ? Note /100".
+// Transforme les données croisées (DPE + DVF + Géorisques + INSEE) en DEUX
+// décisions chiffrées complémentaires — l'investisseur arbitre selon son angle :
 //
-// C'est le différenciateur face à Normi & co : on ne vend pas la donnée,
-// on vend la DÉCISION. La formule ci-dessous est l'IP propriétaire — elle
-// se calibre et s'affine, mais sa logique reste transparente et auditable.
+//   • RendementScore /100  → "combien ça rapporte ?" (cash-flow)
+//        - Rendement locatif brut ... 70 %
+//        - Énergie / DPE ............ 30 %  (une passoire F/G est bientôt
+//                                            interdite à la location → le
+//                                            rendement théorique devient nul)
 //
-// InvestScore = moyenne pondérée de 4 sous-scores (chacun 0-100) :
-//   - Rendement locatif ...... 35 %   (cash-flow : le nerf de l'investissement)
-//   - Énergie / DPE .......... 25 %   (coût réno + interdiction location F/G/E)
-//   - Risque (Géorisques) .... 20 %   (valeur, assurance, revente)
-//   - Tension / liquidité .... 20 %   (facilité de revente, demande locale)
+//   • SécuritéScore /100   → "à quel point c'est sûr et liquide ?"
+//        - Risque (Géorisques) ...... 45 %
+//        - Liquidité de marché ...... 35 %  (volume + fraîcheur des ventes)
+//        - Contexte socio-éco ....... 20 %  (revenu médian = demande solvable)
 //
-// Si une donnée manque, son sous-score est exclu et les poids sont
-// renormalisés sur les composantes disponibles. Le champ `confiance`
-// indique combien des 4 composantes ont pu être calculées.
+// Un bien peut être excellent sur un axe et mauvais sur l'autre : c'est tout
+// l'intérêt de séparer. Ex. Paris = rendement faible mais sécurité correcte ;
+// petite ville = fort rendement mais liquidité plus faible.
 //
-// ⚠️ v1 : le rendement locatif est ESTIMÉ à partir du prix/m² (relation
-// empirique prix↔rendement en France) tant que la "carte des loyers" n'est
-// pas branchée. Passer `loyerM2Mois` en option calcule le vrai rendement.
-// C'est la première donnée à brancher pour rendre le score précis
-// (cf. carnet 11.2-bis, axe VALEUR/RENDEMENT).
+// C'est le différenciateur face à Normi & co : on ne vend pas la donnée, on
+// vend la DÉCISION. La formule est l'IP propriétaire — transparente, auditable,
+// calibrable. Si une donnée manque, sa composante est exclue et les poids sont
+// renormalisés. `confiance` indique combien de composantes ont été calculées.
+//
+// ⚠️ v2 : le rendement est ESTIMÉ depuis le prix/m² tant que la "carte des
+// loyers" n'est pas branchée. Passer loyerM2Mois calcule le vrai rendement.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// POIDS DES COMPOSANTES (somme = 1). Modifiables ici pour recalibrer.
+// POIDS (chaque groupe somme à 1). Modifiables ici pour recalibrer.
 // ---------------------------------------------------------------------------
-const POIDS = {
-  rendement: 0.35,
-  energie:   0.25,
-  risque:    0.20,
-  tension:   0.20,
-};
+const POIDS_RENDEMENT = { rendement: 0.70, energie: 0.30 };
+const POIDS_SECURITE  = { risque: 0.45, liquidite: 0.35, socioEco: 0.20 };
 
-// ---------------------------------------------------------------------------
-// A. SOUS-SCORE RENDEMENT LOCATIF
-//
-// Rendement brut = (loyer mensuel/m² × 12 × surface) / prix estimé total
-//                = (loyer mensuel/m² × 12) / prix au m²
-//
-// Faute de données de loyers en v1, on estime le rendement à partir du
-// prix/m² : en France le rendement brut est inversement corrélé au prix
-// (Paris ~2,5-3 %, petites villes ~7-9 %). Barème empirique transparent.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// A. RENDEMENT LOCATIF
+// ===========================================================================
 
+// Rendement brut annuel estimé (%) par palier de prix/m² (relation empirique
+// inverse prix↔rendement en France : Paris ~2,8 %, petites villes ~8,5 %).
 function estimerRendementDepuisPrix(prixM2) {
-  // Rendement brut annuel estimé (%) par palier de prix/m².
   if (!Number.isFinite(prixM2) || prixM2 <= 0) return null;
   if (prixM2 < 1500)  return 8.5;
   if (prixM2 < 2500)  return 7.0;
@@ -57,12 +50,11 @@ function estimerRendementDepuisPrix(prixM2) {
   return 2.8;
 }
 
-// Renvoie { rendementBrutPct, loyerM2Mois, estime }
+// { rendementBrutPct, loyerM2Mois, estime }
 function calculerRendement(prixM2, loyerM2Mois) {
   if (Number.isFinite(loyerM2Mois) && loyerM2Mois > 0 && Number.isFinite(prixM2) && prixM2 > 0) {
-    const rendementBrutPct = (loyerM2Mois * 12) / prixM2 * 100;
     return {
-      rendementBrutPct: Math.round(rendementBrutPct * 100) / 100,
+      rendementBrutPct: Math.round((loyerM2Mois * 12) / prixM2 * 100 * 100) / 100,
       loyerM2Mois: Math.round(loyerM2Mois * 100) / 100,
       estime: false,
     };
@@ -76,33 +68,21 @@ function calculerRendement(prixM2, loyerM2Mois) {
   };
 }
 
-// Rendement brut → score 0-100 (linéaire : 2 % → 0, 8 % → 100).
+// Rendement brut → 0-100 (2 % → 0, 8 % → 100).
 function scoreRendement(rendementBrutPct) {
   if (!Number.isFinite(rendementBrutPct)) return null;
-  const min = 2, max = 8;
-  const pct = (rendementBrutPct - min) / (max - min) * 100;
+  const pct = (rendementBrutPct - 2) / (8 - 2) * 100;
   return Math.max(0, Math.min(100, Math.round(pct)));
 }
 
-// ---------------------------------------------------------------------------
-// B. SOUS-SCORE ÉNERGIE / DPE
+// ===========================================================================
+// B. ÉNERGIE / DPE
 //
-// L'étiquette DPE n'est pas cosmétique pour un investisseur : la loi Climat
-// interdit progressivement la MISE EN LOCATION des passoires thermiques —
-// G interdit depuis 2025, F en 2028, E en 2034. Un bien G/F est donc une
-// FUTURE impossibilité locative + un coût de rénovation. C'est un facteur
-// de décision réel, pas un détail.
-// ---------------------------------------------------------------------------
+// Décisif pour un investisseur : la loi Climat interdit la MISE EN LOCATION
+// des passoires — G interdit depuis 2025, F en 2028, E en 2034.
+// ===========================================================================
 
-const ETIQUETTE_SCORES = {
-  A: 100,
-  B: 88,
-  C: 74,
-  D: 58,
-  E: 38,   // sous le seuil, location interdite à partir de 2034
-  F: 18,   // location interdite à partir de 2028
-  G: 0,    // location déjà interdite (2025)
-};
+const ETIQUETTE_SCORES = { A: 100, B: 88, C: 74, D: 58, E: 38, F: 18, G: 0 };
 
 function scoreEnergie(etiquetteDPE) {
   if (!etiquetteDPE) return null;
@@ -111,86 +91,81 @@ function scoreEnergie(etiquetteDPE) {
   return (s === undefined) ? null : s;
 }
 
-// ---------------------------------------------------------------------------
-// C. SOUS-SCORE RISQUE (Géorisques)
+// ===========================================================================
+// C. RISQUE (Géorisques)
 //
 // On part de 100 et on retranche une pénalité par risque présent, pondérée
-// par la sévérité. Plus il y a de risques et plus ils sont sévères, plus le
-// score baisse (impact sur valeur, prime d'assurance, revente).
-// ---------------------------------------------------------------------------
+// par sévérité, avec un plancher (un bien n'est jamais "0 sécurité" à cause
+// des seuls risques : beaucoup de communes ont plusieurs risques faibles
+// ubiquistes comme l'argile). Renvoie aussi le détail pour calibrage.
+// ===========================================================================
 
 const PENALITE_NIVEAU = {
-  important: 18,
-  existant:  10,
-  concerne:  10,
-  present:   8,
-  faible:    4,
+  important: 15,
+  existant:  7,
+  concerne:  7,
+  present:   6,
+  faible:    2,
 };
 
-function scoreRisque(georisques) {
-  if (!georisques) return null;
-  let penalite = 0;
+const PLANCHER_RISQUE = 20;   // le risque seul ne descend pas sous 20/100
 
-  const compter = (bloc) => {
+function analyserRisque(georisques) {
+  if (!georisques) return { score: null, detail: null };
+  let penalite = 0;
+  const detail = { naturels: {}, technologiques: {} };
+
+  const compter = (bloc, cible) => {
     if (!bloc) return;
-    for (const niveau of Object.values(bloc)) {
+    for (const [cle, niveau] of Object.entries(bloc)) {
       const n = String(niveau).toLowerCase();
-      penalite += PENALITE_NIVEAU[n] ?? 6;
+      penalite += PENALITE_NIVEAU[n] ?? 5;
+      cible[cle] = n;
     }
   };
+  compter(georisques.risquesNaturels, detail.naturels);
+  compter(georisques.risquesTechnologiques, detail.technologiques);
 
-  compter(georisques.risquesNaturels);
-  compter(georisques.risquesTechnologiques);
-
-  return Math.max(0, Math.min(100, Math.round(100 - penalite)));
+  const score = Math.max(PLANCHER_RISQUE, Math.min(100, Math.round(100 - penalite)));
+  return { score, detail, nbPresents: georisques.nbRisquesPresents ?? null };
 }
 
-// ---------------------------------------------------------------------------
-// D. SOUS-SCORE TENSION / LIQUIDITÉ DE MARCHÉ
-//
-// Proxy de la facilité de revente et de la demande locale :
-//   - nb de transactions comparables (marché actif = liquide)
-//   - ancienneté de la dernière transaction (récent = marché vivant)
-//   - revenu médian INSEE (demande solvable stable dans la zone)
-//
-// Ce n'est PAS le rendement (une zone chère et liquide a un score de
-// tension élevé mais un rendement faible) : c'est la sécurité/liquidité.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// D. LIQUIDITÉ DE MARCHÉ (volume + fraîcheur des transactions)
+// ===========================================================================
 
-function scoreTension(dvf, insee) {
+function scoreLiquidite(dvf) {
+  if (!dvf) return null;
   const parts = [];
 
-  // 1. Volume de comparables : 3 → ~40, 30+ → 100
-  if (dvf && Number.isFinite(dvf.nbTransactionsComparables)) {
+  if (Number.isFinite(dvf.nbTransactionsComparables)) {
     const n = dvf.nbTransactionsComparables;
-    const s = Math.max(0, Math.min(100, Math.round(40 + (n - 3) / (30 - 3) * 60)));
-    parts.push(s);
+    parts.push(Math.max(0, Math.min(100, Math.round(40 + (n - 3) / (30 - 3) * 60))));
   }
-
-  // 2. Fraîcheur de la dernière transaction (année) : <1 an → 100, >5 ans → 20
-  if (dvf && dvf.derniereTransaction) {
+  if (dvf.derniereTransaction) {
     const annee = parseInt(String(dvf.derniereTransaction).slice(0, 4), 10);
     if (Number.isFinite(annee)) {
-      const ageAns = new Date().getFullYear() - annee;
-      const s = Math.max(20, Math.min(100, Math.round(100 - ageAns * 16)));
-      parts.push(s);
+      const age = new Date().getFullYear() - annee;
+      parts.push(Math.max(20, Math.min(100, Math.round(100 - age * 16))));
     }
   }
-
-  // 3. Revenu médian INSEE (demande solvable) : 15k€ → 30, 35k€+ → 100
-  if (insee && Number.isFinite(insee.revenuMedianNiveauVie)) {
-    const r = insee.revenuMedianNiveauVie;
-    const s = Math.max(20, Math.min(100, Math.round(30 + (r - 15000) / (35000 - 15000) * 70)));
-    parts.push(s);
-  }
-
   if (parts.length === 0) return null;
   return Math.round(parts.reduce((a, b) => a + b, 0) / parts.length);
 }
 
-// ---------------------------------------------------------------------------
-// LETTRE GLOBALE + LIBELLÉ
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// E. CONTEXTE SOCIO-ÉCONOMIQUE (revenu médian = demande solvable)
+// ===========================================================================
+
+function scoreSocioEco(insee) {
+  if (!insee || !Number.isFinite(insee.revenuMedianNiveauVie)) return null;
+  const r = insee.revenuMedianNiveauVie;
+  return Math.max(20, Math.min(100, Math.round(30 + (r - 15000) / (35000 - 15000) * 70)));
+}
+
+// ===========================================================================
+// AGRÉGATION
+// ===========================================================================
 
 function noteVersLettre(note) {
   if (note >= 80) return "A";
@@ -200,23 +175,38 @@ function noteVersLettre(note) {
   return "E";
 }
 
-const LIBELLES = {
-  A: "Excellent potentiel d'investissement locatif",
-  B: "Bon potentiel, quelques réserves",
-  C: "Potentiel correct, à étudier de près",
-  D: "Potentiel faible, vigilance requise",
-  E: "Investissement risqué ou peu rentable",
+const LIBELLES_RENDEMENT = {
+  A: "Excellent rendement locatif",
+  B: "Bon rendement",
+  C: "Rendement correct",
+  D: "Rendement faible",
+  E: "Rendement très faible",
 };
 
-// ---------------------------------------------------------------------------
+const LIBELLES_SECURITE = {
+  A: "Placement très sûr et liquide",
+  B: "Placement sûr",
+  C: "Sécurité correcte",
+  D: "Sécurité fragile",
+  E: "Placement risqué / peu liquide",
+};
+
+// Combine des composantes {score, poids} en renormalisant sur celles présentes.
+function agreger(composantes) {
+  const dispo = composantes.filter(c => c.score !== null && c.score !== undefined);
+  if (dispo.length === 0) return { note: null, nbComposantes: 0 };
+  const poidsTotal = dispo.reduce((a, c) => a + c.poids, 0);
+  const note = Math.round(dispo.reduce((a, c) => a + c.score * c.poids, 0) / poidsTotal);
+  return { note, nbComposantes: dispo.length };
+}
+
+// ===========================================================================
 // FONCTION PRINCIPALE
 //
-// `resultat` = un DPE enrichi (avec .etiquetteDPE, .surfaceM2, .dvf,
-//              .insee, .georisques) tel qu'assemblé dans la route /dpe.
-// `options`  = { loyerM2Mois? } pour calculer le vrai rendement si connu.
-//
-// Renvoie null si AUCUNE composante n'est calculable (données trop pauvres).
-// ---------------------------------------------------------------------------
+// `resultat` = DPE enrichi (.etiquetteDPE, .surfaceM2, .dvf, .insee,
+//              .georisques). `options.loyerM2Mois` → rendement réel.
+// Renvoie null si AUCUNE composante n'est calculable.
+// ===========================================================================
 
 function calculerInvestScore(resultat, options = {}) {
   if (!resultat) return null;
@@ -226,62 +216,64 @@ function calculerInvestScore(resultat, options = {}) {
   const georisques = resultat.georisques || null;
   const prixM2 = dvf && Number.isFinite(dvf.prixMedianM2) ? dvf.prixMedianM2 : null;
 
-  // --- A. Rendement ---
+  // Composantes brutes
   const rendement = calculerRendement(prixM2, options.loyerM2Mois);
   const sRendement = rendement ? scoreRendement(rendement.rendementBrutPct) : null;
+  const sEnergie   = scoreEnergie(resultat.etiquetteDPE);
+  const risque     = analyserRisque(georisques);
+  const sLiquidite = scoreLiquidite(dvf);
+  const sSocioEco  = scoreSocioEco(insee);
 
-  // --- B. Énergie ---
-  const sEnergie = scoreEnergie(resultat.etiquetteDPE);
+  // --- RendementScore ---
+  const aggRdt = agreger([
+    { score: sRendement, poids: POIDS_RENDEMENT.rendement },
+    { score: sEnergie,   poids: POIDS_RENDEMENT.energie },
+  ]);
 
-  // --- C. Risque ---
-  const sRisque = scoreRisque(georisques);
+  // --- SécuritéScore ---
+  const aggSec = agreger([
+    { score: risque.score, poids: POIDS_SECURITE.risque },
+    { score: sLiquidite,   poids: POIDS_SECURITE.liquidite },
+    { score: sSocioEco,    poids: POIDS_SECURITE.socioEco },
+  ]);
 
-  // --- D. Tension ---
-  const sTension = scoreTension(dvf, insee);
+  if (aggRdt.note === null && aggSec.note === null) return null;
 
-  // --- Agrégation avec renormalisation sur les composantes disponibles ---
-  const composantes = [
-    { cle: "rendement", score: sRendement, poids: POIDS.rendement },
-    { cle: "energie",   score: sEnergie,   poids: POIDS.energie },
-    { cle: "risque",    score: sRisque,    poids: POIDS.risque },
-    { cle: "tension",   score: sTension,   poids: POIDS.tension },
-  ].filter(c => c.score !== null);
-
-  if (composantes.length === 0) return null;
-
-  const poidsTotal = composantes.reduce((a, c) => a + c.poids, 0);
-  const note = Math.round(
-    composantes.reduce((a, c) => a + c.score * c.poids, 0) / poidsTotal
-  );
-
-  const lettre = noteVersLettre(note);
-
-  // --- Drivers : les 2 forces et 2 faiblesses les plus marquantes ---
-  const tries = [...composantes].sort((a, b) => b.score - a.score);
-  const forces = tries.filter(c => c.score >= 65).slice(0, 2).map(c => c.cle);
-  const faiblesses = tries.filter(c => c.score < 50).slice(-2).map(c => c.cle);
-
-  return {
-    note,                        // 0-100
-    lettre,                      // A-E
-    libelle: LIBELLES[lettre],
-    confiance: `${composantes.length}/4`,  // nb de composantes calculées
-    sousScores: {
-      rendement: sRendement,
-      energie:   sEnergie,
-      risque:    sRisque,
-      tension:   sTension,
-    },
-    drivers: { forces, faiblesses },
+  const rendementScore = aggRdt.note === null ? null : {
+    note: aggRdt.note,
+    lettre: noteVersLettre(aggRdt.note),
+    libelle: LIBELLES_RENDEMENT[noteVersLettre(aggRdt.note)],
+    composantes: { rendement: sRendement, energie: sEnergie },
     details: {
       rendementBrutPct: rendement ? rendement.rendementBrutPct : null,
-      loyerM2MoisUtilise: rendement ? rendement.loyerM2Mois : null,
+      loyerM2Mois: rendement ? rendement.loyerM2Mois : null,
       loyerEstime: rendement ? rendement.estime : null,
       prixMedianM2: prixM2,
       etiquetteDPE: resultat.etiquetteDPE ?? null,
-      nbRisquesPresents: georisques ? georisques.nbRisquesPresents : null,
     },
-    methodologie: "InvestScore v1 — BData X. Pondération : rendement 35% (estimé du prix/m² en v1), énergie/DPE 25%, risque 20%, tension marché 20%.",
+  };
+
+  const securiteScore = aggSec.note === null ? null : {
+    note: aggSec.note,
+    lettre: noteVersLettre(aggSec.note),
+    libelle: LIBELLES_SECURITE[noteVersLettre(aggSec.note)],
+    composantes: { risque: risque.score, liquidite: sLiquidite, socioEco: sSocioEco },
+    details: {
+      nbRisquesPresents: risque.nbPresents,
+      risquesDetail: risque.detail,
+      revenuMedianCommune: insee ? insee.revenuMedianNiveauVie : null,
+    },
+  };
+
+  const nbTotal = aggRdt.nbComposantes + aggSec.nbComposantes;
+
+  return {
+    rendementScore,
+    securiteScore,
+    confiance: `${nbTotal}/5`,   // 2 composantes rendement + 3 sécurité
+    methodologie:
+      "InvestScore v2 — BData X. RendementScore = rendement 70% (estimé du prix/m² en v2) + énergie 30%. " +
+      "SécuritéScore = risque 45% + liquidité 35% + socio-éco 20%.",
   };
 }
 
@@ -292,9 +284,12 @@ export const _internes = {
   calculerRendement,
   scoreRendement,
   scoreEnergie,
-  scoreRisque,
-  scoreTension,
+  analyserRisque,
+  scoreLiquidite,
+  scoreSocioEco,
   noteVersLettre,
-  POIDS,
+  agreger,
+  POIDS_RENDEMENT,
+  POIDS_SECURITE,
   ETIQUETTE_SCORES,
 };
