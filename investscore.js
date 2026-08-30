@@ -124,15 +124,32 @@ function plafonnerRendement(note, etiquetteDPE) {
 // ubiquistes comme l'argile). Renvoie aussi le détail pour calibrage.
 // ===========================================================================
 
+// Pénalité par NIVEAU. Géorisques marque la plupart des aléas "existant"
+// (= cartographié dans la commune) ou "concerne" (= commune administrativement
+// concernée) : ce sont des présences par défaut, faible signal. Seul
+// "important" traduit une vraie sévérité. On pondère donc fortement par
+// la sévérité, pas par le simple nombre d'aléas.
 const PENALITE_NIVEAU = {
-  important: 15,
-  existant:  7,
-  concerne:  7,
-  present:   6,
-  faible:    2,
+  important: 13,   // vraie sévérité
+  existant:  3,    // présence cartographiée, signal faible
+  concerne:  2,    // administratif, très faible signal
+  present:   3,
+  faible:    1,
 };
 
-const PLANCHER_RISQUE = 20;   // le risque seul ne descend pas sous 20/100
+// Aléas MAJEURS : ceux qui pèsent réellement sur la valeur/assurabilité d'un
+// bien. Bonus de pénalité ajouté quand ils sont présents pour de vrai
+// (niveau "existant" ou "important", pas "concerne"/"faible").
+const HAZARD_MAJEUR = {
+  inondation:      7,
+  ruptureBarrage:  5,
+  risqueCotier:    4,
+  reculTraitCote:  3,
+  mouvementTerrain: 3,
+};
+const NIVEAUX_REELS = new Set(["existant", "important"]);
+
+const PLANCHER_RISQUE = 5;    // le risque seul ne descend pas sous 5/100
 
 function analyserRisque(georisques) {
   if (!georisques) return { score: null, detail: null };
@@ -143,7 +160,10 @@ function analyserRisque(georisques) {
     if (!bloc) return;
     for (const [cle, niveau] of Object.entries(bloc)) {
       const n = String(niveau).toLowerCase();
-      penalite += PENALITE_NIVEAU[n] ?? 5;
+      penalite += PENALITE_NIVEAU[n] ?? 3;
+      if (HAZARD_MAJEUR[cle] && NIVEAUX_REELS.has(n)) {
+        penalite += HAZARD_MAJEUR[cle];
+      }
       cible[cle] = n;
     }
   };
