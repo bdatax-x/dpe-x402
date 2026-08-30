@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 import { paymentMiddleware } from "x402-express";
 import fs from "fs";
 import path from "path";
+import { calculerInvestScore } from "./investscore.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -225,10 +226,15 @@ const FACILITATOR_URL =
 const PRICE_USDC =
   process.env.PRICE_USDC || "$0.001";
 
+// Prix premium de l'InvestScore : on vend une DÉCISION, pas de la donnée.
+// 10× le prix de la donnée brute par défaut. Ajustable via .env.
+const PRICE_SCORE_USDC =
+  process.env.PRICE_SCORE_USDC || "$0.01";
+
 if (RECEIVER_ADDRESS) {
 
   console.log(
-    `x402 activé : ${PRICE_USDC} sur ${NETWORK} vers ${RECEIVER_ADDRESS}`
+    `x402 activé : /dpe ${PRICE_USDC} · /dpe/score ${PRICE_SCORE_USDC} sur ${NETWORK} vers ${RECEIVER_ADDRESS}`
   );
 
   app.use(
@@ -237,6 +243,10 @@ if (RECEIVER_ADDRESS) {
       {
         "GET /dpe": {
           price: PRICE_USDC,
+          network: NETWORK
+        },
+        "GET /dpe/score": {
+          price: PRICE_SCORE_USDC,
           network: NETWORK
         }
       },
@@ -2580,6 +2590,139 @@ app.get(
 );
 
 // ============================================================================
+// ROUTE /dpe/score — LA DÉCISION (produit premium)
+//
+// Rejoue la recherche puis ne renvoie QUE la décision chiffrée (InvestScore)
+// pour le meilleur bien correspondant. C'est le cœur de la stratégie
+// "vendre la décision, pas la donnée" : pas de dump de DPE, pas de tableaux
+// bruts — juste le score, ses composantes et les drivers. Prix premium
+// (PRICE_SCORE_USDC, 10× la donnée brute par défaut).
+//
+// Mêmes critères de recherche que /dpe (adresse, cp, voie, numero, numeroDPE,
+// lat/lon). Paramètre optionnel loyerM2Mois=12.5 pour un rendement réel.
+// ============================================================================
+
+app.get(
+  "/dpe/score",
+  async (req, res) => {
+    const debut = Date.now();
+    try {
+      const recherche = construireRecherche(req);
+
+      // Analyse d'adresse libre → numero / cp
+      if (recherche.adresse) {
+        const analyse = analyserAdresse(recherche.adresse);
+        if (!recherche.numero && analyse.numero) recherche.numero = analyse.numero;
+        if (!recherche.cp && analyse.cp) recherche.cp = analyse.cp;
+      }
+
+      // Géocodage BAN (adresse → GPS) pour permettre l'enrichissement DVF
+      if (recherche.adresse && recherche.lat === null && recherche.lon === null) {
+        try {
+          const geo = await geocoderBAN(recherche.adresse, recherche);
+          if (geo && Number.isFinite(geo.latitude) && Number.isFinite(geo.longitude)) {
+            recherche.lat = geo.latitude;
+            recherche.lon = geo.longitude;
+            if (!recherche.cp && geo.postcode) recherche.cp = geo.postcode;
+            if (!recherche.ville && geo.city) recherche.ville = geo.city;
+            if (!recherche.voie && geo.street) recherche.voie = geo.street;
+            if (!recherche.numero && geo.housenumber) recherche.numero = geo.housenumber;
+          }
+        } catch (e) {
+          console.error("score/BAN :", e.message);
+        }
+      }
+
+      // Au moins un critère
+      if (
+        !recherche.cp && !recherche.adresse && !recherche.voie &&
+        !recherche.ville && !recherche.numeroDPE &&
+        (recherche.lat === null || recherche.lon === null)
+      ) {
+        return res.status(400).json({
+          erreur: "Il faut fournir au moins un critère de recherche.",
+          exemples: [
+            "/dpe/score?adresse=203 rue Saint-Honoré 75001 Paris",
+            "/dpe/score?adresse=12 rue de la Paix 75002 Paris&loyerM2Mois=32"
+          ]
+        });
+      }
+
+      // Requêtes ADEME (parallèle)
+      const requetes = construireRequetes(recherche);
+      const reponses = await Promise.all(
+        requetes.map((q) => rechercherADEME(q, 100).catch(() => null))
+      );
+
+      let bruts = [];
+      for (const data of reponses) {
+        if (data && Array.isArray(data.results)) bruts.push(...data.results);
+      }
+
+      // Nettoyage + score de pertinence + dédup + classement
+      let resultats = bruts
+        .map(nettoyerDPE)
+        .map((dpe) => ({ ...dpe, scoreRecherche: calculerScore(dpe, recherche) }));
+      resultats = dedupliquer(resultats);
+      resultats = classerResultats(resultats, recherche.surface);
+
+      if (resultats.length === 0) {
+        return res.status(404).json({
+          trouve: false,
+          message: "Aucun DPE trouvé pour cette recherche.",
+          recherche
+        });
+      }
+
+      // Meilleur bien → enrichissement complet → InvestScore
+      const loyerM2Mois = (() => {
+        const v = parseFloat(String(req.query.loyerM2Mois ?? "").replace(",", "."));
+        return Number.isFinite(v) && v > 0 ? v : undefined;
+      })();
+
+      const meilleur = resultats[0];
+      const enrichi = {
+        ...meilleur,
+        dvf: enrichirAvecDVF(meilleur),
+        georisques: await enrichirAvecGeorisques(meilleur),
+        insee: enrichirAvecINSEE(meilleur)
+      };
+      const investScore = calculerInvestScore(enrichi, { loyerM2Mois });
+
+      // Réponse : LA DÉCISION uniquement (pas de dump de données)
+      return res.json({
+        service: "DPE-X402 · InvestScore",
+        version: "0.8.0",
+        trouve: true,
+        bien: {
+          adresse: enrichi.adresse ?? null,
+          ville: enrichi.ville ?? null,
+          codePostal: enrichi.codePostal ?? null,
+          typeBatiment: enrichi.typeBatiment ?? null,
+          surfaceM2: enrichi.surfaceM2 ?? null,
+          etiquetteDPE: enrichi.etiquetteDPE ?? null,
+          numeroDPE: enrichi.numeroDPE ?? null
+        },
+        investScore: investScore ?? {
+          note: null,
+          message: "Données insuffisantes pour calculer un score fiable."
+        },
+        contexte: {
+          prixMedianM2: enrichi.dvf ? enrichi.dvf.prixMedianM2 : null,
+          prixEstimeTotal: enrichi.dvf ? enrichi.dvf.prixEstimeTotal : null,
+          nbRisquesPresents: enrichi.georisques ? enrichi.georisques.nbRisquesPresents : null,
+          revenuMedianCommune: enrichi.insee ? enrichi.insee.revenuMedianNiveauVie : null
+        },
+        meta: { tempsMs: Date.now() - debut }
+      });
+    } catch (error) {
+      console.error("Erreur /dpe/score :", error);
+      return res.status(500).json({ erreur: "Erreur interne", detail: error.message });
+    }
+  }
+);
+
+// ============================================================================
 // ROUTE DPE
 // ============================================================================
 
@@ -3095,26 +3238,45 @@ app.get(
       // = quelques ms.
       // ----------------------------------------------------------------------
 
+      // Loyer/m²/mois optionnel : si l'appelant le connaît, l'InvestScore
+      // calcule le VRAI rendement au lieu de l'estimer depuis le prix.
+      const loyerM2Mois = (() => {
+        const v = parseFloat(String(req.query.loyerM2Mois ?? "").replace(",", "."));
+        return Number.isFinite(v) && v > 0 ? v : undefined;
+      })();
+
       resultats = await Promise.all(
-        resultats.map(async (dpe) => ({
-          ...dpe,
-          dvf: enrichirAvecDVF(dpe),
-          georisques: await enrichirAvecGeorisques(dpe),
-          insee: enrichirAvecINSEE(dpe)
-        }))
+        resultats.map(async (dpe) => {
+          const enrichi = {
+            ...dpe,
+            dvf: enrichirAvecDVF(dpe),
+            georisques: await enrichirAvecGeorisques(dpe),
+            insee: enrichirAvecINSEE(dpe)
+          };
+          // InvestScore : la DÉCISION calculée sur les données croisées.
+          enrichi.investScore = calculerInvestScore(enrichi, { loyerM2Mois });
+          return enrichi;
+        })
       );
 
       // Idem pour dpeLePlusRecent (calculé avant le slice) : on l'enrichit
       // aussi pour la cohérence de la réponse.
       const dpeLePlusRecentEnrichi =
         dpeLePlusRecent
-          ? {
-              ...dpeLePlusRecent,
-              dvf: enrichirAvecDVF(dpeLePlusRecent),
-              georisques: await enrichirAvecGeorisques(dpeLePlusRecent),
-              insee: enrichirAvecINSEE(dpeLePlusRecent)
-            }
+          ? (() => {
+              const e = {
+                ...dpeLePlusRecent,
+                dvf: enrichirAvecDVF(dpeLePlusRecent),
+                georisques: null,  // rempli juste après (await)
+                insee: enrichirAvecINSEE(dpeLePlusRecent)
+              };
+              return e;
+            })()
           : null;
+      if (dpeLePlusRecentEnrichi) {
+        dpeLePlusRecentEnrichi.georisques = await enrichirAvecGeorisques(dpeLePlusRecent);
+        dpeLePlusRecentEnrichi.investScore = calculerInvestScore(dpeLePlusRecentEnrichi, { loyerM2Mois });
+      }
 
       // ----------------------------------------------------------------------
       // MEILLEUR RESULTAT
