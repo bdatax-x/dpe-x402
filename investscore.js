@@ -91,6 +91,30 @@ function scoreEnergie(etiquetteDPE) {
   return (s === undefined) ? null : s;
 }
 
+// Plafond de LOUABILITÉ : un logement interdit à la location ne peut pas avoir
+// un bon RendementScore, même si son prix bas donne un rendement théorique
+// élevé — car son vrai rendement locatif est nul (ou bientôt nul).
+//   G : location interdite depuis 2025  → plafond 15
+//   F : location interdite dès 2028      → plafond 45 (rentable ~2 ans, gros
+//                                          chantier de rénovation à venir)
+//   E : interdite dès 2034 (~8 ans)      → pas de plafond dur, déjà signalé
+//                                          par le sous-score énergie (38)
+const PLAFOND_LOCATION = { G: 15, F: 45 };
+
+function plafonnerRendement(note, etiquetteDPE) {
+  if (note === null) return { note, restriction: null };
+  const l = String(etiquetteDPE || "").trim().toUpperCase().charAt(0);
+  const cap = PLAFOND_LOCATION[l];
+  if (cap !== undefined && note > cap) {
+    const msgs = {
+      G: "DPE G — location interdite depuis 2025 (rendement locatif nul)",
+      F: "DPE F — location interdite à partir de 2028",
+    };
+    return { note: cap, restriction: msgs[l] };
+  }
+  return { note, restriction: null };
+}
+
 // ===========================================================================
 // C. RISQUE (Géorisques)
 //
@@ -239,10 +263,14 @@ function calculerInvestScore(resultat, options = {}) {
 
   if (aggRdt.note === null && aggSec.note === null) return null;
 
-  const rendementScore = aggRdt.note === null ? null : {
-    note: aggRdt.note,
-    lettre: noteVersLettre(aggRdt.note),
-    libelle: LIBELLES_RENDEMENT[noteVersLettre(aggRdt.note)],
+  // Applique le plafond de louabilité (F/G interdits à la location)
+  const plaf = plafonnerRendement(aggRdt.note, resultat.etiquetteDPE);
+  const noteRdt = plaf.note;
+
+  const rendementScore = noteRdt === null ? null : {
+    note: noteRdt,
+    lettre: noteVersLettre(noteRdt),
+    libelle: LIBELLES_RENDEMENT[noteVersLettre(noteRdt)],
     composantes: { rendement: sRendement, energie: sEnergie },
     details: {
       rendementBrutPct: rendement ? rendement.rendementBrutPct : null,
@@ -250,6 +278,8 @@ function calculerInvestScore(resultat, options = {}) {
       loyerEstime: rendement ? rendement.estime : null,
       prixMedianM2: prixM2,
       etiquetteDPE: resultat.etiquetteDPE ?? null,
+      noteAvantPlafond: (plaf.restriction && aggRdt.note !== noteRdt) ? aggRdt.note : null,
+      restrictionLocation: plaf.restriction,
     },
   };
 
@@ -284,6 +314,7 @@ export const _internes = {
   calculerRendement,
   scoreRendement,
   scoreEnergie,
+  plafonnerRendement,
   analyserRisque,
   scoreLiquidite,
   scoreSocioEco,
