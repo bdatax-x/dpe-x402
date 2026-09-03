@@ -1,0 +1,68 @@
+BData X — French Property Intelligence for AI Agents
+Property intelligence API + MCP server for AI agents: energy performance, market value, environmental risks, socioeconomic context, and investment scores. Monetized per-request via x402 micropayments on Base mainnet.
+BData X provides AI agents with instant French property intelligence. Each API call crosses five public French datasets: energy performance certificates (ADEME/DPE), real estate transactions (DGFiP/DVF), natural and technological risks (BRGM/Géorisques), commune-level socio-economic indicators (INSEE FILOSOFI), and address geocoding (BAN/IGN).
+For each property search, the API returns matching DPE records enriched with:
+Market value estimates (median EUR/m2 based on comparable transactions within 200m)
+Environmental risk synthesis (flood, earthquake, radon, clay shrinkage, industrial hazards)
+Socio-economic context (median income, poverty rate, income deciles)
+InvestScore: proprietary investment scores (Rendement + Securite) for decision-grade analysis
+Ideal for autonomous AI agents in real estate investment, insurance underwriting, credit scoring, property valuation, and real estate tokenization.
+MCP Server (Model Context Protocol)
+BData X provides an official MCP server that enables AI agents to query French property intelligence directly from Claude Desktop, Cursor, Cline, and other MCP-compatible tools.
+Installation: npx -y bdatax-immo-mcp
+Available tools:
+investscore(adresse: string, loyerM2Mois?: number) — returns investment scores (Rendement + Securite) with DPE, market value, and risk analysis
+dpe(adresse: string | cp: string) — returns full DPE data with enrichments
+The MCP server handles x402 payments automatically. Each tool call costs about 0.01 USDC for basic DPE queries or about 0.02 USDC for InvestScore analysis.
+Registry: Official MCP Registry - io.github.benliberte/immo v0.1.2
+npm: https://www.npmjs.com/package/bdatax-immo-mcp
+Machine-readable specs
+OpenAPI 3.1 spec: https://dpe.bdatax.com/openapi.json
+x402 discovery: https://dpe.bdatax.com/.well-known/x402.json
+Endpoints
+GET /dpe
+Search DPE records enriched with DVF + Georisques + INSEE. Query by cp, adresse, voie, numero, ville, numeroDPE, lat/lon, or identifiantBAN. Returns JSON, CSV, or XLSX via ?format=.
+Cost: about 0.001 USDC per call
+GET /dpe/score
+Investment analysis endpoint returning proprietary scores:
+RendementScore (0-100): rental yield potential based on market value, energy performance, and local demand
+SecuriteScore (0-100): investment safety based on environmental risks, market liquidity, and socioeconomic stability
+Confidence level and detailed breakdown
+Cost: about 0.02 USDC per call
+Example API Calls
+GET /dpe?cp=75001 — DPE in Paris 1st arrondissement
+GET /dpe?adresse=203 rue Saint-Honore 75001 Paris — free-form address search
+GET /dpe?lat=48.864968&lon=2.331665 — GPS coordinates
+GET /dpe?numeroDPE=2175E0465600P — direct DPE ID lookup
+GET /dpe/score?adresse=20 rue de la Republique 42000 Saint-Etienne — investment scores
+Response Fields
+Each /dpe result includes: numeroDPE, adresse, codePostal, codeInsee, surfaceM2, etiquetteDPE (A-G), etiquetteGES (A-G), coutAnnuelTotal, latitude, longitude, and three enrichment blocks:
+dvf — { prixMedianM2, prixEstimeTotal, nbTransactionsComparables, derniereTransaction, rayonMetres, ecartSurfacePct }
+georisques — { commune, codeInsee, risquesNaturels, risquesTechnologiques, nbRisquesPresents, sourceUrl }
+insee — { revenuMedianNiveauVie, tauxPauvrete, decile1, decile9, rapportInterdecile, partSalaires, partRetraites, nombreMenages, nombrePersonnes, source }
+The /dpe/score endpoint returns:
+scores.rendement (value, grade, label)
+scores.securite (value, grade, label)
+property (surface, dpe, prixM2)
+confidence level
+sources used
+All enrichment blocks return null when data is insufficient. The API is honest about uncertainty rather than guessing.
+Payment Technology
+Protocol: x402 v2 (HTTP 402 Payment Required extension by Coinbase)
+Blockchain: Base mainnet (Ethereum L2)
+Asset: USDC - contract 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+No account required: payment signed automatically by x402-compatible clients
+Client libraries: x402-fetch (Node.js), x402-axios
+Data Sources (Open Data / Licence Ouverte)
+ADEME DPE (10.4M records): https://data.ademe.fr
+DGFiP DVF (1.67M transactions 2024-2025): https://www.data.gouv.fr/fr/datasets/demandes-de-valeurs-foncieres-geolocalisees/
+BRGM Georisques: https://www.georisques.gouv.fr
+INSEE FILOSOFI 2021: https://www.insee.fr/fr/statistiques/7756729
+IGN BAN (geocoding): https://adresse.data.gouv.fr
+Documentation
+GitHub repository: https://github.com/bdatax-x/dpe-x402
+data.gouv.fr API listing: https://www.data.gouv.fr/dataservices/dpe-x402
+data.gouv.fr reuse: https://www.data.gouv.fr/reuses/dpe-x402-api-donnees-immobilieres-francaises-pour-agents-ia
+Provider
+BData X — portfolio of French public data APIs monetized via x402 for the machine economy.
+Website: https://bdatax.com
