@@ -4,6 +4,7 @@ import { paymentMiddleware } from "x402-express";
 import fs from "fs";
 import path from "path";
 import { calculerInvestScore } from "./investscore.js";
+import { enregistrerVente, calculerStats } from "./ventes.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -2590,6 +2591,34 @@ app.get(
 );
 
 // ============================================================================
+// ROUTE /stats — Tableau de bord des ventes (privé, protégé par token)
+//
+// Renvoie l'agrégation du journal des ventes : nombre d'appels, répartition
+// par endpoint, revenu total et EXTERNE (hors tes tests), payeurs uniques,
+// dernières ventes. Gratuit (pas x402) mais protégé par STATS_TOKEN.
+//
+// Usage : GET /stats?token=TON_TOKEN
+// Configure STATS_TOKEN dans les variables d'environnement (Render).
+// ============================================================================
+
+app.get(
+  "/stats",
+  (req, res) => {
+    const token = process.env.STATS_TOKEN;
+    if (!token) {
+      return res.status(503).json({
+        erreur: "STATS_TOKEN non configuré.",
+        solution: "Ajoute une variable d'environnement STATS_TOKEN (une phrase secrète) dans Render, puis appelle /stats?token=CETTE_VALEUR.",
+      });
+    }
+    if (req.query.token !== token) {
+      return res.status(401).json({ erreur: "Token invalide. Usage : /stats?token=TON_TOKEN" });
+    }
+    return res.json(calculerStats(RECEIVER_ADDRESS));
+  }
+);
+
+// ============================================================================
 // ROUTE /dpe/score — LA DÉCISION (produit premium)
 //
 // Rejoue la recherche puis ne renvoie QUE la décision chiffrée (InvestScore)
@@ -2607,6 +2636,9 @@ app.get(
   async (req, res) => {
     const debut = Date.now();
     try {
+      // Journal des ventes : n'enregistre que si un paiement x402 est présent
+      enregistrerVente(req, "/dpe/score");
+
       const recherche = construireRecherche(req);
 
       // Analyse d'adresse libre → numero / cp
@@ -2789,6 +2821,9 @@ app.get(
     }
 
     try {
+
+      // Journal des ventes : n'enregistre que si un paiement x402 est présent
+      enregistrerVente(req, "/dpe");
 
       // ----------------------------------------------------------------------
       // CONSTRUCTION RECHERCHE
